@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import shapely
+import shapely.affinity
 
 from quickpaver._types import NDArrayFloat, StrEnum
 

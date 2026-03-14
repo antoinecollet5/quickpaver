@@ -4,6 +4,7 @@
 from importlib import resources
 
 import shapely
+import shapely.affinity
 
 
 def load_france_contour() -> shapely.Polygon:

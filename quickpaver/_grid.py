@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import List, Literal, Optional, Sequence, Tuple, Union
 
 import matplotlib as mpl
+import matplotlib.path
 import numpy as np
 from scipy.sparse import csc_array, lil_array
 
@@ -640,7 +641,7 @@ def get_vertices_centroid(
 def get_centroid_voxel_coords(
     vertices: Union[NDArrayFloat, List[Tuple[float, float]]],
     grid: RectilinearGrid,
-) -> Tuple[int, int]:
+) -> Tuple[Int, Int]:
     """
     For a given convex polygon an a 2D grid, give the centroid voxel.
 
