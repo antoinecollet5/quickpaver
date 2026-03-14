@@ -10,7 +10,7 @@ readme = "README.rst"
 description = "A python package providing a tiling/paving toolbox."
 keywords = ["Paving", "Tiling", "Triangle", "Hexagon", "Grid", "Rectilinear"]
 license = { file = "LICENSE" }
-dependencies = ["numpy>=1.2", "shapely>=2.1"]
+dependencies = ["numpy>=1.2", "shapely>=2.1", "scipy>=1.10"]
 
 requires-python = ">=3.10"
 classifiers = [
