@@ -1,0 +1,133 @@
+[build-system]
+requires = ["setuptools>=42,<=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quickpaver"
+dynamic = ["version"]
+authors = [{ name = "Antoine Collet", email = "antoinecollet5@gmail.com" }]
+readme = "README.rst"
+description = "A python package providing a tiling/paving toolbox."
+keywords = ["Paving", "Tiling", "Triangle", "Hexagon", "Grid", "Rectilinear"]
+license = { file = "LICENSE" }
+dependencies = ["numpy>=1.2", "shapely>=2.1"]
+
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Homepage = "https://pypi.org/project/quickpaver/"
+Documentation = "https://quickpaver.readthedocs.io/en/latest/"
+Repository = "https://github.com/antoinecollet5/quickpaver"
+Issues = "https://github.com/antoinecollet5/quickpaver/issues"
+Changelog = "https://github.com/antoinecollet5/quickpaver/blob/master/CHANGELOG.rst"
+
+[tool.setuptools]
+py-modules = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quickpaver*"]
+
+[tool.setuptools.package-data]
+quickpaver = ["data/*.geojson"]
+
+[tool.setuptools.dynamic]
+version = { attr = "quickpaver.__about__.__version__" }
+
+[project.optional-dependencies]
+all = ['quickpaver[install, lint, tests, examples, docs]']
+docs = [
+    "quickpaver[examples]",
+    "sphinx<9",
+    "nbsphinx",
+    "nbsphinx-link>=1.3.1",
+    "jupyter_sphinx>=0.3.2",
+    "sphinx-jsonschema>=1.15",
+    "pygments>=2.11.1",
+    "pydata-sphinx-theme",
+    "sphinxcontrib-bibtex",
+    "sphinx_math_dollar",
+    "jupytext",
+]
+tests = [
+    "twine==1.14.0",
+    "pytest",
+    "pytest-runner",
+    "pytest-cov",
+    "pytest-cookies",
+    "coverage",
+]
+examples = ["matplotlib", "marimo", "nested_grid_plotter>=2.1.0"]
+scikit_sparse_old = ["scikit-sparse<0.5.0"]
+lint = ["pre-commit", "codespell>=2.1.0", "ruff", "ty"]
+install = ["pip", "wheel"]
+
+[tool.ruff]
+lint.select = [
+    # Pyflakes
+    "F",
+    # Pycodestyle
+    "E",
+    "W",
+    # isort
+    "I",
+]
+src = ["quickpaver", "tests", "docs", "notebooks"]
+
+# Allow autofix for all enabled rules (when `--fix`) is provided.
+lint.fixable = ["A", "B", "C", "D", "E", "F", "I"]
+lint.unfixable = []
+
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+]
+
+# Same as Black.
+line-length = 88
+
+# Allow unused variables when underscore-prefixed.
+lint.dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.pylint.LOGGING]
+# Format style used to check logging format string. `old` means using %
+# formatting, `new` is for `{}` formatting,and `fstr` is for f-strings.
+logging-format-style = "fstr"
+
+[tool.ty.src]
+include = ["quickpaver", "tests", "notebooks"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "notebooks"]
