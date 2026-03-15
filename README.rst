@@ -135,3 +135,8 @@ TODO
 
 .. |DOI| image:: https://zenodo.org/badge/DOI/10.5281/zenodo.18900358.svg
    :target: https://doi.org/10.5281/zenodo.18900358
+
+
+.. image:: https://api.codacy.com/project/badge/Grade/00500e48dcae4314a24b0aea1b45d1f0
+   :alt: Codacy Badge
+   :target: https://app.codacy.com/gh/antoinecollet5/quickpaver?utm_source=github.com&utm_medium=referral&utm_content=antoinecollet5/quickpaver&utm_campaign=Badge_Grade
