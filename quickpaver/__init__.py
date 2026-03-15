@@ -26,7 +26,6 @@ This is the core ! description TODO.
     gen_rectangular_tiling
     gen_triangular_tiling
     gen_polygonal_tiling
-    gen_circular_bounding_tiling
     extract_tiling_centers
     extract_tiling_vertices
 
@@ -43,8 +42,6 @@ Functions providing test data.
     load_france_and_corsica_contour
 
 
-.. currentmodule:: pyrtid.utils.grid
-
 Regular grids
 ^^^^^^^^^^^^^
 
@@ -53,14 +50,11 @@ Provide utilities to work with rectilinear grids.
 .. autosummary::
    :toctree: _autosummary
 
-    indices_to_node_number
-    node_number_to_indices
     span_to_node_numbers_2d
     span_to_node_numbers_3d
     create_selections_array_2d
     RectilinearGrid
     get_polygon_selection_with_dilation_2d
-    get_extended_grid_shape
 
 """
 
@@ -99,17 +93,13 @@ __all__ = [
     "gen_polygon",
     "gen_rectangular_tiling",
     "gen_triangular_tiling",
-    "gen_circular_bounding_tiling",
     "gen_polygonal_tiling",
     "RectilinearGrid",
     "create_selections_array_2d",
     "get_a_not_in_b_1d",
     "get_array_borders_selection_2d",
     "get_array_borders_selection_3d",
-    "get_extended_grid_shape",
     "get_polygon_selection_with_dilation_2d",
-    "indices_to_node_number",
-    "node_number_to_indices",
     "span_to_node_numbers_2d",
     "span_to_node_numbers_3d",
     "rlg_idx_to_nn",

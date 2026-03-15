@@ -1,5 +1,5 @@
 Welcome to quickpaver's documentation!
-===================================
+======================================
 
 .. include:: readme.rst
 

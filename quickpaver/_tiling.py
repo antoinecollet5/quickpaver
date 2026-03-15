@@ -168,8 +168,7 @@ def gen_rectangular_tiling(
         A tuple containing:
             - A shapely collection of polygons.
             - A dictionary where keys are hexagon indices and values are sets of
-            adjacent
-            hexagon indices.
+              adjacent hexagon indices.
 
     """
     # extract the coordinates of the bounding box
@@ -309,7 +308,7 @@ def gen_hexagonal_tiling(
         A tuple containing:
             - A shapely collection of polygons.
             - A dictionary where keys are hexagon indices and values are sets
-            of adjacent hexagon indices.
+              of adjacent hexagon indices.
 
     """
     # extract the coordinates of the bounding box
@@ -445,7 +444,7 @@ def gen_triangular_tiling(
         A tuple containing:
             - A shapely collection of polygons.
             - A dictionary where keys are hexagon indices and values are sets of
-            adjacent hexagon indices.
+              adjacent hexagon indices.
 
     """
     # extract the coordinates of the bounding box
@@ -548,7 +547,7 @@ def gen_polygonal_tiling(
         A tuple containing:
             - A shapely collection of polygons.
             - A dictionary where keys are hexagon indices and values are sets of
-            adjacent hexagon indices.
+              adjacent hexagon indices.
 
     """
     rot_surface_to_cover = shapely.affinity.rotate(

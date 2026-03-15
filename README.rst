@@ -1,8 +1,8 @@
-=======
+==========
 quickpaver
-=======
+==========
 
-|License| |Stars| |Python| |PyPI| |Downloads| |Build Status| |Documentation Status| |Coverage| |Codacy| |Precommit: enabled| |Ruff| |ty| |DOI|
+|License| |Stars| |Python| |PyPI| |Downloads| |Build Status| |Documentation Status| |Coverage| |Codacy| |Precommit: enabled| |Ruff| |ty|
 
 🐍 A python package providing a tiling/paving toolbox.
 
@@ -118,7 +118,7 @@ TODO
     :target: https://codecov.io/gh/antoinecollet5/quickpaver
     :alt: Coverage
 
-.. |Codacy| image:: https://app.codacy.com/project/badge/Grade/c41f65d98b824de394162520b0d8a17a
+.. |Codacy| image:: https://app.codacy.com/project/badge/Grade/19adca492f0f4d36872644343bd4eb36
     :target: https://app.codacy.com/gh/antoinecollet5/quickpaver/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade
     :alt: codacy
 
@@ -132,6 +132,3 @@ TODO
 .. |ty| image:: https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json
     :target: https://github.com/astral-sh/ty
     :alt: Checked with ty
-
-.. |DOI| image:: https://zenodo.org/badge/DOI/10.5281/zenodo.18900358.svg
-   :target: https://doi.org/10.5281/zenodo.18900358

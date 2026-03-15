@@ -90,7 +90,7 @@ After approval, a maintainer will merge it.
 Thank you very much for your contribution and for helping improve quickpaver!
 
 Setting Up quickpaver for Local Development
------------------------------------------
+--------------------------------------------
 
 Ready to contribute? Here’s how to set up `quickpaver` for local development.
 
