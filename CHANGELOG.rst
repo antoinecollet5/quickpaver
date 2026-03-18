@@ -2,7 +2,7 @@
 Changelog
 ==============
 
-0.2.0 (2026-03-17)
+0.2.0 (2026-03-18)
 ------------------
 
 * `extract_tiling_vertices` now returns clusters for vertices.

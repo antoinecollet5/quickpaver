@@ -130,3 +130,6 @@ include = ["quickpaver", "tests", "notebooks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "notebooks"]
+
+[tool.bandit]
+skips = ["B101"]

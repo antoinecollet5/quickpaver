@@ -94,11 +94,11 @@ def _(mo):
 
 
 @app.cell
-def _(quickpaver):
+def _(plot_polygon, quickpaver):
     corsica = quickpaver.load_corsica_contour()
     france = quickpaver.load_france_contour()
     france_and_corsica = quickpaver.load_france_and_corsica_contour()
-    france_and_corsica
+    plot_polygon(france_and_corsica, add_points=False)
     return corsica, france, france_and_corsica
 
 
@@ -135,7 +135,7 @@ def _(Union, ngp, plot_polygon, shapely):
 def _(mo):
     mo.md(r"""
     - Start with a square tiling, without rotation and no anisotropy.
-    On peut voir que seul les mailles intersectant la surface à couvrir sont conservées.
+    We can see that only the meshes intersecting the surface to be covered are retained.
     """)
     return
 
