@@ -2,3 +2,16 @@
 exclude_paths:
   - '.github/**'
   - 'docs/conf.py'
+
+engines:
+  bandit:
+    enabled: true
+    config:
+      skips:
+        - B101  # ignore "assert used" warning
+
+  pylint:
+    enabled: true
+    config:
+      disable:
+        - assert-used
