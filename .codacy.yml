@@ -15,3 +15,6 @@ engines:
     config:
       disable:
         - assert-used
+
+assert_used:
+  skips: ['*_test.py', '*test_*.py']
