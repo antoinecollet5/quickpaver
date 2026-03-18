@@ -896,7 +896,7 @@ def get_polygon_selection_with_dilation_3d(
     return _selection
 
 
-def keep_a_b_if_c_in_a(
+def _keep_a_b_if_c_in_a(
     a: NDArrayInt, b: NDArrayInt, c: NDArrayInt
 ) -> Tuple[NDArrayInt, NDArrayInt]:
     """Keep values in a and b if c in a."""
@@ -938,11 +938,11 @@ def get_owner_neigh_indices(
     )
 
     if owner_indices_to_keep is not None:
-        indices_owner, indices_neigh = keep_a_b_if_c_in_a(
+        indices_owner, indices_neigh = _keep_a_b_if_c_in_a(
             indices_owner, indices_neigh, owner_indices_to_keep
         )
     if neigh_indices_to_keep is not None:
-        indices_neigh, indices_owner = keep_a_b_if_c_in_a(
+        indices_neigh, indices_owner = _keep_a_b_if_c_in_a(
             indices_neigh, indices_owner, neigh_indices_to_keep
         )
     return indices_owner, indices_neigh

@@ -50,19 +50,41 @@ Provide utilities to work with rectilinear grids.
 .. autosummary::
    :toctree: _autosummary
 
+    RectilinearGrid
+    binary_dilation
+    conservative_upsample
+    create_selections_array_2d
+    duplicative_upsample
+    get_owner_neigh_indices
+    get_polygon_selection_with_dilation_2d
+    get_polygon_selection_with_dilation_3d
+    get_rlg_perm_mat
+    get_rlg_spatial_grad_mat
+    make_rlg_spatial_gradient_matrices
+    make_rlg_spatial_permutation_matrices
+    resample_grid
+    rlg_idx_to_nn
+    rlg_nn_to_idx
     span_to_node_numbers_2d
     span_to_node_numbers_3d
-    create_selections_array_2d
-    RectilinearGrid
-    get_polygon_selection_with_dilation_2d
 
 """
 
 from quickpaver.__about__ import __author__, __email__, __version__
 from quickpaver._grid import (
     RectilinearGrid,
+    binary_dilation,
+    conservative_upsample,
     create_selections_array_2d,
+    duplicative_upsample,
+    get_owner_neigh_indices,
     get_polygon_selection_with_dilation_2d,
+    get_polygon_selection_with_dilation_3d,
+    get_rlg_perm_mat,
+    get_rlg_spatial_grad_mat,
+    make_rlg_spatial_gradient_matrices,
+    make_rlg_spatial_permutation_matrices,
+    resample_grid,
     rlg_idx_to_nn,
     rlg_nn_to_idx,
     span_to_node_numbers_2d,
@@ -96,14 +118,21 @@ __all__ = [
     "gen_polygonal_tiling",
     "RectilinearGrid",
     "create_selections_array_2d",
-    "get_a_not_in_b_1d",
-    "get_array_borders_selection_2d",
-    "get_array_borders_selection_3d",
-    "get_polygon_selection_with_dilation_2d",
-    "span_to_node_numbers_2d",
-    "span_to_node_numbers_3d",
     "rlg_idx_to_nn",
     "rlg_nn_to_idx",
+    "span_to_node_numbers_2d",
+    "span_to_node_numbers_3d",
+    "binary_dilation",
+    "get_owner_neigh_indices",
+    "get_polygon_selection_with_dilation_2d",
+    "get_polygon_selection_with_dilation_3d",
+    "get_rlg_spatial_grad_mat",
+    "make_rlg_spatial_gradient_matrices",
+    "get_rlg_perm_mat",
+    "make_rlg_spatial_permutation_matrices",
+    "resample_grid",
+    "duplicative_upsample",
+    "conservative_upsample",
     "load_france_contour",
     "load_corsica_contour",
     "load_france_and_corsica_contour",

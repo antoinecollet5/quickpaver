@@ -11,7 +11,7 @@ import numpy as np
 import shapely
 import shapely.affinity
 
-from quickpaver._types import NDArrayFloat, StrEnum
+from quickpaver._types import NDArrayFloat, NDArrayInt, StrEnum
 
 SQRT3 = math.sqrt(3)
 
@@ -40,7 +40,7 @@ def gen_polygon(
         Edge length for the base polygon. The default is 1.0.
     edge_length: float
         Edge length for the base polygon.
-        E.g., choosing :py:attr:`PolygonType.SQUARE` with `anisotropy_ratio` = 2
+        E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
         results in rectangles with scale (1.0, 2.0).
 
     Returns
@@ -159,7 +159,7 @@ def gen_rectangular_tiling(
         Edge length for the base polygon.
     edge_length: float
         Edge length for the base polygon.
-        E.g., choosing :py:attr:`PolygonType.SQUARE` with `anisotropy_ratio` = 2
+        E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
         results in rectangles with scale (1.0, 2.0).
 
     Returns
@@ -299,7 +299,7 @@ def gen_hexagonal_tiling(
         Edge length for the base polygon.
     edge_length: float
         Edge length for the base polygon.
-        E.g., choosing :py:attr:`PolygonType.SQUARE` with `anisotropy_ratio` = 2
+        E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
         results in rectangles with scale (1.0, 2.0).
 
     Returns
@@ -365,30 +365,78 @@ def gen_hexagonal_tiling(
 
 
 def extract_tiling_centers(polygons: List[shapely.Polygon]) -> NDArrayFloat:
+    """
+    _summary_
+
+    Parameters
+    ----------
+    polygons : List[shapely.Polygon]
+        _description_
+
+    Returns
+    -------
+    NDArrayFloat
+        _description_
+    """
     return np.array([geom.centroid.xy for geom in polygons])[:, :, 0]
 
 
 def extract_tiling_vertices(
-    polygons: List[shapely.Polygon],
-) -> Tuple[NDArrayFloat, Dict[int, List[int]]]:
+    polygons: List[shapely.Polygon], n_decimals: int = 2
+) -> Tuple[NDArrayFloat, Dict[int, List[int]], NDArrayInt]:
+    """
+    _summary_
+
+    Parameters
+    ----------
+    polygons : List[shapely.Polygon]
+        _description_
+    n_decimals : int, optional
+        _description_, by default 2
+
+    Returns
+    -------
+    Tuple[NDArrayFloat, Dict[int, List[int]]]
+        _description_
+    """
 
     # Convert polygons to arrays of vertices (rounded to avoid floating point issues)
     verts = [
-        np.round(np.array(p.exterior.coords[:-1]), 8) for p in polygons
+        np.round(np.array(p.exterior.coords[:-1]), decimals=n_decimals)
+        for p in polygons
     ]  # drop repeated last point
 
     # Build a dict: vertex tuple -> list of polygon indices
     vert_to_polys = defaultdict(list)
+
+    # number of vertices
+    nv = 0
     for i, v in enumerate(verts):
         for x, y in v:
             vert_to_polys[(x, y)].append(i)
+            # update the number of vertices
+            nv += 1
 
-    return np.array(list(vert_to_polys.keys())), {
-        i: polys for i, polys in enumerate(vert_to_polys.values())
-    }
+    # Cluster the vertices
+    cluster_indices = np.zeros(nv, dtype=np.int64)
+    _ids = {k: i for i, k in enumerate(vert_to_polys.keys())}
+    # Iterate the points
+    nv = 0
+    for i, v in enumerate(verts):
+        for x, y in v:
+            cluster_indices[nv] = _ids[(x, y)]
+            nv += 1
+
+    return (
+        np.array(list(vert_to_polys.keys())),
+        {i: polys for i, polys in enumerate(vert_to_polys.values())},
+        cluster_indices,
+    )
 
 
-def adjacency_by_shared_vertices(polygons: List[shapely.Polygon]) -> Dict[int, list]:
+def adjacency_by_shared_vertices(
+    polygons: List[shapely.Polygon],
+) -> Dict[int, List[int]]:
     """
     Compute adjacency dictionary based on polygons sharing vertices.
 
@@ -403,7 +451,7 @@ def adjacency_by_shared_vertices(polygons: List[shapely.Polygon]) -> Dict[int, l
         Dictionary mapping polygon index to a list of neighboring polygon indices
         (sharing at least one vertex).
     """
-    verts, vert_to_polys = extract_tiling_vertices(polygons)
+    verts, vert_to_polys, _ = extract_tiling_vertices(polygons)
 
     # Build adjacency dict
     adj = defaultdict(set)
@@ -414,8 +462,7 @@ def adjacency_by_shared_vertices(polygons: List[shapely.Polygon]) -> Dict[int, l
                     adj[i].add(j)
 
     # Convert sets to sorted lists
-    adj = {i: sorted(list(neigh)) for i, neigh in adj.items()}
-    return adj
+    return {i: sorted(list(neigh)) for i, neigh in adj.items()}
 
 
 def gen_triangular_tiling(
@@ -435,7 +482,7 @@ def gen_triangular_tiling(
         Edge length for the base polygon.
     edge_length: float
         Edge length for the base polygon.
-        E.g., choosing :py:attr:`PolygonType.SQUARE` with `anisotropy_ratio` = 2
+        E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
         results in rectangles with scale (1.0, 2.0).
 
     Returns
@@ -517,7 +564,7 @@ def gen_polygonal_tiling(
     poly_type: PolygonType,
     edge_length: float,
     anisotropy_ratio: float = 1.0,
-    rot_deg=30.0,
+    rot_deg=0.0,
 ) -> Tuple[shapely.MultiPolygon, Dict[int, List[int]]]:
     """
     Cover the given surface with tiles (polygons) of the desired type.
@@ -532,14 +579,14 @@ def gen_polygonal_tiling(
         geometries.
     edge_length: float
         Edge length for the base polygon.
-        E.g., choosing :py:attr:`PolygonType.SQUARE` with `anisotropy_ratio` = 2
+        E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
         results in rectangles with scale (1.0, 2.0).
     edge_length : float
         _description_
     anisotropy_ratio : float, optional
         _description_, by default 1.0
     rot_deg : float, optional
-        _description_, by default 30.0
+        _description_, by default 0.
 
     Returns
     -------

@@ -49,29 +49,39 @@ def _(mo):
 
 @app.cell
 def _(ngp, plot_polygon, plt, quickpaver):
-    plotter = ngp.Plotter(
-        plt.figure(figsize=(8, 8), constrained_layout=True),
-        builder=ngp.SubplotsMosaicBuilder(
-            mosaic=[[f"ax{i}-{j}" for j in range(3)] for i in range(3)],
-            sharex=True,
-            sharey=True,
-        ),
-    )
+    def make_polygons():
+        plotter = ngp.Plotter(
+            plt.figure(figsize=(8, 8), constrained_layout=True),
+            builder=ngp.SubplotsMosaicBuilder(
+                mosaic=[[f"ax{i}-{j}" for j in range(3)] for i in range(3)],
+                sharex=True,
+                sharey=True,
+            ),
+        )
 
-    for i, poly_type in enumerate(quickpaver.PolygonType.to_list()):
-        for j, anisotropy_ratio in enumerate([1.0, 2.0, 0.5]):
-            ax = plotter.ax_dict[f"ax{i}-{j}"]
-            plot_polygon(
-                quickpaver.gen_polygon(
-                    poly_type.value, edge_length=30.0, anisotropy_ratio=anisotropy_ratio
-                ),
-                ax=ax,
-            )
-            ngp.hide_axis_spine(ax, loc="all")
-            ax.set_aspect("equal")
-            ngp.hide_axis_ticklabels(ax)
-            ax.set_title(f"Anisotropy\nratio = {anisotropy_ratio:.1f}")
-    plotter.fig
+        for i, poly_type in enumerate(quickpaver.PolygonType.to_list()):
+            for j, anisotropy_ratio in enumerate([1.0, 2.0, 0.5]):
+                ax = plotter.ax_dict[f"ax{i}-{j}"]
+                plot_polygon(
+                    quickpaver.gen_polygon(
+                        poly_type.value,
+                        edge_length=30.0,
+                        anisotropy_ratio=anisotropy_ratio,
+                    ),
+                    ax=ax,
+                )
+                ngp.hide_axis_spine(ax, loc="all")
+                ax.set_aspect("equal")
+                ngp.hide_axis_ticklabels(ax)
+                ax.set_title(f"Anisotropy\nratio = {anisotropy_ratio:.1f}")
+        return plotter.fig
+
+    return (make_polygons,)
+
+
+@app.cell
+def _(make_polygons):
+    make_polygons()
     return
 
 
@@ -115,6 +125,7 @@ def _(Union, ngp, plot_polygon, shapely):
             add_points=False,
         )
         ax.set_aspect("equal")
+        plotter.close()
         return plotter.fig
 
     return (plot_helper,)
@@ -335,36 +346,36 @@ def _(mo):
 
 
 @app.cell
-def _(france, grid_hexagons_france_rot, plot_helper, plt, quickpaver):
+def _(france, grid_hexagons_france_rot, plot_helper, quickpaver):
     centers = quickpaver.extract_tiling_centers(grid_hexagons_france_rot.geoms)
-    vertices, v_c_adj = quickpaver.extract_tiling_vertices(
+    vertices, v_c_adj, clusters_2 = quickpaver.extract_tiling_vertices(
         grid_hexagons_france_rot.geoms
     )
 
-    plot_helper(grid_hexagons_france_rot, france)
-    plt.scatter(centers[:, 0], centers[:, 1], color="b", label="centers")
-    plt.scatter(vertices[:, 0], vertices[:, 1], color="g", label="vertices")
-    plt.legend()
+    plotter2 = plot_helper(grid_hexagons_france_rot, france)
+    plotter2.axes[0].scatter(centers[:, 0], centers[:, 1], color="b", label="centers")
+    plotter2.axes[0].scatter(
+        vertices[:, 0], vertices[:, 1], color="g", label="vertices"
+    )
+    plotter2.axes[0].legend()
+    plotter2
     return
 
 
 @app.cell
-def _(
-    france_and_corsica,
-    grid_triangles_rot_ani,
-    plot_helper,
-    plt,
-    quickpaver,
-):
+def _(france_and_corsica, grid_triangles_rot_ani, plot_helper, quickpaver):
     centers2 = quickpaver.extract_tiling_centers(grid_triangles_rot_ani.geoms)
-    vertices2, v_c_adj2 = quickpaver.extract_tiling_vertices(
+    vertices2, v_c_adj2, clusters_3 = quickpaver.extract_tiling_vertices(
         grid_triangles_rot_ani.geoms
     )
 
-    plot_helper(grid_triangles_rot_ani, france_and_corsica)
-    plt.scatter(centers2[:, 0], centers2[:, 1], color="b", label="centers")
-    plt.scatter(vertices2[:, 0], vertices2[:, 1], color="g", label="vertices")
-    plt.legend()
+    plotter3 = plot_helper(grid_triangles_rot_ani, france_and_corsica)
+    plotter3.axes[0].scatter(centers2[:, 0], centers2[:, 1], color="b", label="centers")
+    plotter3.axes[0].scatter(
+        vertices2[:, 0], vertices2[:, 1], color="g", label="vertices"
+    )
+    plotter3.axes[0].legend()
+    plotter3
     return
 
 

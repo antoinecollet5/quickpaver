@@ -40,7 +40,57 @@ You might also clone the repository and install from source
 
     pip install -e .
 
-Once the installation is done, `quickpaver` is straighforward to use and proposes...
+Once the installation is done, `quickpaver` is straighforward to use and proposes.
+In this tutorial, we will see how to generate tiling using rectangles, triangles
+and hexagons. We will also play with anisotropy and angles.
+
+Start by importing the required modules
+
+.. code-block::
+
+    from typing import Union
+
+    import matplotlib.pyplot as plt
+    import nested_grid_plotter as ngp
+    import quickpaver
+    import shapely
+    from shapely.plotting import plot_polygon
+
+There is a choice between three shapes: **triangle**, **rectangle**, and
+**hexagon**. By default, the shapes are regular: the triangle is **equilateral**,
+the rectangle is a **square**, and the hexagon is not distorted. The **anisotropy**
+allows the shape to be stretched or shortened along the y-axis.
+
+.. code-block::
+
+    def make_polygons():
+        plotter = ngp.Plotter(
+            plt.figure(figsize=(8, 8), constrained_layout=True),
+            builder=ngp.SubplotsMosaicBuilder(
+                mosaic=[[f"ax{i}-{j}" for j in range(3)] for i in range(3)],
+                sharex=True,
+                sharey=True,
+            ),
+        )
+
+        for i, poly_type in enumerate(quickpaver.PolygonType.to_list()):
+            for j, anisotropy_ratio in enumerate([1.0, 2.0, 0.5]):
+                ax = plotter.ax_dict[f"ax{i}-{j}"]
+                plot_polygon(
+                    quickpaver.gen_polygon(
+                        poly_type.value, edge_length=30.0, anisotropy_ratio=anisotropy_ratio
+                    ),
+                    ax=ax,
+                )
+                ngp.hide_axis_spine(ax, loc="all")
+                ax.set_aspect("equal")
+                ngp.hide_axis_ticklabels(ax)
+                ax.set_title(f"Anisotropy\nratio = {anisotropy_ratio:.1f}")
+        return plotter.fig
+
+    make_polygons()
+
+
 
 🏗️ Complete example with supporting paper coming Q1 2026.
 

@@ -53,7 +53,7 @@ def test_gen_polygonal_tiling(
     )
 
     _ = extract_tiling_centers(tiles.geoms)
-    _, _ = extract_tiling_vertices(tiles.geoms)
+    _, _, _ = extract_tiling_vertices(tiles.geoms)
 
 
 def test_gen_polygonal_tiling_wrong_polytype() -> None:
