@@ -140,7 +140,7 @@ Start with a square tiling, without rotation and no anisotropy. We can see that 
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_squares_corsica_no_rot_no_ani.png
    :alt: grid_squares_corsica_no_rot_no_ani
-   :width: 50%
+   :width: 60%
    :align: center
 
 To obtain extended coverage, you simply need to modify the working domain.
@@ -159,7 +159,7 @@ For example, you can choose the minimum bounding ball:
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_squares_corsica_circle.png
    :alt: grid_squares_corsica_circle
-   :width: 50%
+   :width: 60%
    :align: center
 
 Or using the bounding box
@@ -177,7 +177,7 @@ Or using the bounding box
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_squares_corsica_rectangle.png
    :alt: grid_squares_corsica_rectangle
-   :width: 50%
+   :width: 60%
    :align: center
 
 Now, let's try with anisotropy and rotation (it goes clockwise)
@@ -195,7 +195,7 @@ Now, let's try with anisotropy and rotation (it goes clockwise)
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_squares_corsica_rot_ani.png
    :alt: grid_squares_corsica_rot_ani
-   :width: 50%
+   :width: 60%
    :align: center
 
 Let's try again with different parameters
@@ -213,7 +213,7 @@ Let's try again with different parameters
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_squares_corsica_rot_ani2.png
    :alt: grid_squares_corsica_rot_ani2
-   :width: 50%
+   :width: 60%
    :align: center
 
 As previously introduced, hexagonal grids are also supported. Let's now play
@@ -232,7 +232,7 @@ with France outline:
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_hexagons_france_no_rot_no_ani.png
    :alt: grid_hexagons_france_no_rot_no_ani
-   :width: 50%
+   :width: 60%
    :align: center
 
 
@@ -251,7 +251,7 @@ By default the hexagons are "flat-top" oriented, but it is very easily changed:
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_hexagons_france_rot.png
    :alt: grid_hexagons_france_rot
-   :width: 50%
+   :width: 60%
    :align: center
 
 Now let's try with triangles
@@ -269,7 +269,7 @@ Now let's try with triangles
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_triangles_no_rot_ani.png
    :alt: grid_triangles_no_rot_ani
-   :width: 50%
+   :width: 60%
    :align: center
 
 Same with anisotropy:
@@ -287,7 +287,7 @@ Same with anisotropy:
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_triangles_rot_ani.png
    :alt: grid_triangles_rot_ani
-   :width: 50%
+   :width: 60%
    :align: center
 
 .. code-block:: python
@@ -322,7 +322,7 @@ the vertices and the centers is also provided)
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_hexagons_france_rot_vertices.png.png
    :alt: grid_hexagons_france_rot_vertices
-   :width: 50%
+   :width: 60%
    :align: center
 
 .. code-block::
@@ -342,7 +342,7 @@ the vertices and the centers is also provided)
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_triangles_rot_ani_vertices.png
    :alt: grid_triangles_rot_ani_vertices
-   :width: 50%
+   :width: 60%
    :align: center
 
 Of course, it works with holes
@@ -364,7 +364,7 @@ Of course, it works with holes
 
 .. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_hex_donut.png
    :alt: grid_hex_donut
-   :width: 50%
+   :width: 60%
    :align: center
 
 
