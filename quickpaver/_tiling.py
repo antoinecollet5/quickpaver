@@ -5,7 +5,7 @@
 
 import math
 from collections import defaultdict
-from typing import Dict, List, Tuple, Union
+from typing import Dict, Iterable, List, Tuple, Union
 
 import numpy as np
 import shapely
@@ -364,46 +364,62 @@ def gen_hexagonal_tiling(
     return shapely.MultiPolygon(polygons[mask]), adjacency_dict
 
 
-def extract_tiling_centers(polygons: List[shapely.Polygon]) -> NDArrayFloat:
+def extract_tiling_centers(
+    polygons: Union[shapely.MultiPolygon, Iterable[shapely.Polygon]],
+) -> NDArrayFloat:
     """
-    _summary_
+    Extract the centers of each tile (polygon).
 
     Parameters
     ----------
-    polygons : List[shapely.Polygon]
-        _description_
+    polygons : Union[shapely.MultiPolygon, Iterable[shapely.Polygon]]
+        Polygons for which centers are extracted.
 
     Returns
     -------
     NDArrayFloat
-        _description_
+        - 2D Array of vertices coordinates with shape (n, 2), n being the number of
+          polygons.
     """
-    return np.array([geom.centroid.xy for geom in polygons])[:, :, 0]
+    if isinstance(polygons, shapely.MultiPolygon):
+        _polygons = polygons.geoms
+    else:
+        _polygons = polygons
+    return np.array([geom.centroid.xy for geom in _polygons])[:, :, 0]
 
 
 def extract_tiling_vertices(
-    polygons: List[shapely.Polygon], n_decimals: int = 2
+    polygons: Union[shapely.MultiPolygon, Iterable[shapely.Polygon]],
+    n_decimals: int = 2,
 ) -> Tuple[NDArrayFloat, Dict[int, List[int]], NDArrayInt]:
     """
-    _summary_
+    Extract the vertices of all polygons (without duplicates).
 
     Parameters
     ----------
-    polygons : List[shapely.Polygon]
-        _description_
+    polygons : Union[shapely.MultiPolygon, Iterable[shapely.Polygon]]
+        Polygons for which vertices are extracted.
     n_decimals : int, optional
-        _description_, by default 2
+        Number of decimals to use for the duplicate removal (it relies on hashing),
+        by default 2.
 
     Returns
     -------
-    Tuple[NDArrayFloat, Dict[int, List[int]]]
-        _description_
+    Tuple[NDArrayFloat, Dict[int, List[int]], NDArrayInt]
+        - 2D Array of vertices coordinates with shape (n, 2), n being the number of
+          vertices extracted.
+        - Dict with vertice id ad key and list of associated polygon id as values.
+          This is because duplicated vertices are merged.
     """
+    if isinstance(polygons, shapely.MultiPolygon):
+        _polygons = polygons.geoms
+    else:
+        _polygons = polygons
 
     # Convert polygons to arrays of vertices (rounded to avoid floating point issues)
     verts = [
         np.round(np.array(p.exterior.coords[:-1]), decimals=n_decimals)
-        for p in polygons
+        for p in _polygons
     ]  # drop repeated last point
 
     # Build a dict: vertex tuple -> list of polygon indices

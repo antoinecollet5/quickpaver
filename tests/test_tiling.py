@@ -52,6 +52,11 @@ def test_gen_polygonal_tiling(
         anisotropy_ratio=anisotropy_ratio,
     )
 
+    # MultiPolygon
+    _ = extract_tiling_centers(tiles)
+    _, _, _ = extract_tiling_vertices(tiles)
+
+    # Iterable of polygons
     _ = extract_tiling_centers(tiles.geoms)
     _, _, _ = extract_tiling_vertices(tiles.geoms)
 
