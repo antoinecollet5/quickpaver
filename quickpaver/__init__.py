@@ -50,6 +50,7 @@ Provide utilities to work with rectilinear grids.
 .. autosummary::
    :toctree: _autosummary
 
+    Grid
     RectilinearGrid
     binary_dilation
     conservative_upsample
@@ -72,6 +73,7 @@ Provide utilities to work with rectilinear grids.
 
 from quickpaver.__about__ import __author__, __email__, __version__
 from quickpaver._grid import (
+    Grid,
     RectilinearGrid,
     binary_dilation,
     conservative_upsample,
@@ -116,6 +118,7 @@ __all__ = [
     "gen_rectangular_tiling",
     "gen_triangular_tiling",
     "gen_polygonal_tiling",
+    "Grid",
     "RectilinearGrid",
     "create_selections_array_2d",
     "rlg_idx_to_nn",
