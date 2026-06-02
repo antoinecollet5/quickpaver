@@ -13,6 +13,7 @@ Helpers to work with paving.
 
     PolygonType
     gen_polygon
+    compute_transfer_matrix
 
 Paving functions
 ^^^^^^^^^^^^^^^^
@@ -102,6 +103,7 @@ from quickpaver._tiling import (
     gen_rectangular_tiling,
     gen_triangular_tiling,
 )
+from quickpaver._transfer_matrix import compute_transfer_matrix
 from quickpaver.data import (
     load_corsica_contour,
     load_france_and_corsica_contour,
@@ -141,4 +143,5 @@ __all__ = [
     "load_france_and_corsica_contour",
     "extract_tiling_centers",
     "extract_tiling_vertices",
+    "compute_transfer_matrix",
 ]
