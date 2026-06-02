@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 import numpy as np
 import shapely
 import shapely.affinity
+from numpy.typing import ArrayLike
 
 from quickpaver._types import NDArrayFloat, NDArrayInt, StrEnum
 
@@ -35,7 +36,9 @@ def gen_polygon(
     Parameters
     ----------
     poly_type : PolygonType
-        _description_
+        Type of tile geometry.  See :class:`PolygonType` for the
+        available options (``HEXAGON``, ``TRIANGLE``, ``RECTANGLE``).
+
     edge_length : float, optional
         Edge length for the base polygon. The default is 1.0.
     edge_length: float
@@ -46,12 +49,14 @@ def gen_polygon(
     Returns
     -------
     shapely.Polygon
-        _description_
+        A polygon centred at ``(0, 0)`` with vertices ordered
+        counter-clockwise.
 
     Raises
     ------
     ValueError
-        _description_
+        If *poly_type* is not a recognised :class:`PolygonType` member
+        or valid string alias.
     """
     if poly_type == PolygonType.TRIANGLE:
         return shapely.Polygon(
@@ -146,6 +151,7 @@ def gen_rectangular_tiling(
     surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
     edge_length: float,
     anisotropy_ratio: float = 1.0,
+    alignment_point: Optional[ArrayLike] = None,
 ) -> Tuple[shapely.MultiPolygon, Dict[int, List[int]]]:
     """
     Create a grid of hexagons within the given bounding box.
@@ -161,6 +167,10 @@ def gen_rectangular_tiling(
         Edge length for the base polygon.
         E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
         results in rectangles with scale (1.0, 2.0).
+    alignment_point : array-like of shape (2,), optional
+        ``(x, y)`` world-space coordinate used to shift the tiling
+        so that one tile centre coincides with this point.
+        When ``None`` (default) no alignment shift is applied.
 
     Returns
     -------
@@ -286,6 +296,7 @@ def gen_hexagonal_tiling(
     surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
     edge_length: float,
     anisotropy_ratio: float = 1.0,
+    alignment_point: Optional[ArrayLike] = None,
 ) -> Tuple[shapely.MultiPolygon, Dict[int, List[int]]]:
     """
     Create a grid of hexagons within the given bounding box.
@@ -301,6 +312,10 @@ def gen_hexagonal_tiling(
         Edge length for the base polygon.
         E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
         results in rectangles with scale (1.0, 2.0).
+    alignment_point : array-like of shape (2,), optional
+        ``(x, y)`` world-space coordinate used to shift the tiling
+        so that one tile centre coincides with this point.
+        When ``None`` (default) no alignment shift is applied.
 
     Returns
     -------
@@ -485,6 +500,7 @@ def gen_triangular_tiling(
     surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
     edge_length: float,
     anisotropy_ratio: float = 1.0,
+    alignment_point: Optional[ArrayLike] = None,
 ) -> Tuple[shapely.MultiPolygon, Dict[int, List[int]]]:
     """
     Create a grid of hexagons within the given bounding box.
@@ -500,6 +516,10 @@ def gen_triangular_tiling(
         Edge length for the base polygon.
         E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
         results in rectangles with scale (1.0, 2.0).
+    alignment_point : array-like of shape (2,), optional
+        ``(x, y)`` world-space coordinate used to shift the tiling
+        so that one tile centre coincides with this point.
+        When ``None`` (default) no alignment shift is applied.
 
     Returns
     -------
@@ -581,7 +601,7 @@ def gen_polygonal_tiling(
     edge_length: float,
     anisotropy_ratio: float = 1.0,
     rot_deg: float = 0.0,
-    alignment_point: Optional[float] = None,
+    alignment_point: Optional[ArrayLike] = None,
 ) -> Tuple[shapely.MultiPolygon, Dict[int, List[int]]]:
     """
     Cover the given surface with tiles (polygons) of the desired type.
