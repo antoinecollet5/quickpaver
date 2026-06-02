@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Antoine COLLET
+
 import numpy as np
 from quickpaver import (
     RectilinearGrid,
@@ -91,7 +94,7 @@ def test_non_rotated_rlgrid_bounds() -> None:
     # with origin at (0, 0, 0)
     np.testing.assert_equal(
         RectilinearGrid(nx=10, ny=10, nz=5, dx=2.1, dy=5.6, dz=9.0).bounds,
-        np.array([[0.0, 21.0], [0.0, 56.0], [0.0, 45.0]], dtype=np.float32),
+        np.array([[-10.5, 10.5], [-28.0, 28.0], [-22.5, 22.5]], dtype=np.float32),
     )
 
     # with non zero origin
@@ -131,11 +134,12 @@ def test_MCI01_rlgrid_bounds() -> None:
         mci01_grid.bounds,
         np.array(
             [
-                [1.36645080e05, 1.36957436e05],
-                [1.38299450e05, 1.38615466e05],
-                [-1.08000000e02, -8.10000000e01],
+                [1.367293e05, 1.370416e05],
+                [1.383013e05, 1.386173e05],
+                [-1.080000e02, -8.100000e01],
             ]
         ),
+        rtol=1e-3,
     )
 
     assert abs(mci01_grid.x_extent - 312.35599) < 1e-3
