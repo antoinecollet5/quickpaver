@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Antoine COLLET
+
 import pytest
 import shapely
 from quickpaver import (
@@ -68,7 +71,7 @@ def test_gen_polygonal_tiling_wrong_polytype() -> None:
         gen_polygonal_tiling(
             surface_to_cover=shapely.Point((0.0, 0.0)).buffer(200.0)
             - shapely.Point((0.0, 0.0)).buffer(100.0),
-            poly_type=PolygonType("not_a_valid_type"),
+            poly_type="not_a_valid_type",  # ty:ignore[invalid-argument-type]
             edge_length=10.0,
             anisotropy_ratio=1.0,
         )

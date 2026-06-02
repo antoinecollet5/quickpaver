@@ -5,7 +5,7 @@
 
 import math
 from collections import defaultdict
-from typing import Dict, Iterable, List, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import shapely
@@ -580,38 +580,61 @@ def gen_polygonal_tiling(
     poly_type: PolygonType,
     edge_length: float,
     anisotropy_ratio: float = 1.0,
-    rot_deg=0.0,
+    rot_deg: float = 0.0,
+    alignment_point: Optional[float] = None,
 ) -> Tuple[shapely.MultiPolygon, Dict[int, List[int]]]:
     """
     Cover the given surface with tiles (polygons) of the desired type.
 
+    The tiling is generated in an axis-aligned (non-rotated) frame, then
+    rotated by *rot_deg* degrees around the centroid of *surface_to_cover*
+    so that the final tile orientations match the requested rotation.
+
     Parameters
     ----------
-    surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon]
-        Surface to cover with the tiling. Only the polygon intersecting this surface
-        are kept.
+    surface_to_cover : shapely.Polygon or shapely.MultiPolygon
+        Surface to cover with the tiling.  Only tiles whose footprint
+        intersects this surface are kept in the output.
     poly_type : PolygonType
-        Type of tile (polygon) See :py:class:`PolygonType` for the available
-        geometries.
-    edge_length: float
-        Edge length for the base polygon.
-        E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
-        results in rectangles with scale (1.0, 2.0).
+        Type of tile geometry.  See :class:`PolygonType` for the
+        available options (``HEXAGON``, ``TRIANGLE``, ``RECTANGLE``).
     edge_length : float
-        _description_
+        Primary edge length for the base polygon in metres.
+        For anisotropic tiles the secondary dimension is derived as
+        ``edge_length * anisotropy_ratio``.
     anisotropy_ratio : float, optional
-        _description_, by default 1.0
+        Ratio of the secondary to the primary tile dimension.
+        Must be ≥ 1.  For example, choosing :attr:`PolygonType.RECTANGLE`
+        with ``anisotropy_ratio = 2`` produces rectangles with aspect
+        ratio 1 : 2.  By default ``1.0`` (isotropic).
     rot_deg : float, optional
-        _description_, by default 0.
+        Counter-clockwise rotation angle in degrees applied to the
+        entire tiling around the centroid of *surface_to_cover*.
+        By default ``0.0`` (no rotation).
+    alignment_point : array-like of shape (2,), optional
+        ``(x, y)`` world-space coordinate used to shift the tiling
+        so that one tile centre coincides with this point.
+        When ``None`` (default) no alignment shift is applied.
 
     Returns
     -------
-    Tuple[shapely.MultiPolygon, Dict[int, List[int]]]
-        A tuple containing:
-            - A shapely collection of polygons.
-            - A dictionary where keys are hexagon indices and values are sets of
-              adjacent hexagon indices.
+    tiling : shapely.MultiPolygon
+        Collection of tile polygons covering *surface_to_cover*.
+    adjacency : dict of {int: list of int}
+        Adjacency map where keys are tile indices (0-based, matching the
+        order of geometries in *tiling*) and values are lists of
+        neighbouring tile indices.
 
+    Raises
+    ------
+    ValueError
+        If *poly_type* is not a recognised :class:`PolygonType` member.
+
+    Notes
+    -----
+    Internally the function un-rotates *surface_to_cover* by ``-rot_deg``,
+    generates the axis-aligned tiling, then re-rotates the result by
+    ``+rot_deg`` so that the output tiles are in world-space coordinates.
     """
     rot_surface_to_cover = shapely.affinity.rotate(
         surface_to_cover,
