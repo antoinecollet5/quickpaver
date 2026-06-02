@@ -3,6 +3,8 @@
 
 """Rectilinear grid."""
 
+from __future__ import annotations
+
 import abc
 import math
 from dataclasses import dataclass
@@ -11,6 +13,7 @@ from typing import List, Literal, Optional, Sequence, Tuple, Union
 import matplotlib as mpl
 import matplotlib.path
 import numpy as np
+import shapely
 from scipy.sparse import csc_array, lil_array
 
 from quickpaver._types import Int, NDArrayBool, NDArrayFloat, NDArrayInt
@@ -270,9 +273,9 @@ class RectilinearGrid(Grid):
 
     def __init__(
         self,
-        x0: float = 0.0,
-        y0: float = 0.0,
-        z0: float = 0.0,
+        cx: float = 0.0,
+        cy: float = 0.0,
+        cz: float = 0.0,
         dx: float = 1.0,
         dy: float = 1.0,
         dz: float = 1.0,
@@ -289,12 +292,12 @@ class RectilinearGrid(Grid):
 
         Parameters
         ----------
-        x0 : float
-            Grid origin x coordinate (smalest value, not centroid) in meters.
-        y0 : float
-            Grid origin y coordinate (smalest value, not centroid) in meters.
-        z0 : float
-            Grid origin z coordinate (smalest value, not centroid) in meters.
+        cx : float
+            Grid centre X (world space).
+        cy : float
+            Grid centre Y (world space).
+        cz : float
+            Grid centre Z (world space).
         dx : float
             Mesh size along the x axis in meters.
         dy : float
@@ -307,37 +310,111 @@ class RectilinearGrid(Grid):
             Number of meshes along the y axis.
         nz : int
             Number of meshes along the v axis.
-        rot_center:
-            Coordinates (x, y, z) used as a reference point for the grid rotation.
-            If None, (x0, y0, z0) is used. The default is None.
         theta : float
-            z-axis rotation angle in degrees with (x0, y0, z0) as origin.
+            z-axis rotation angle in degrees with (cx, cy, cz) as origin.
         phi : float
-            y-axis-rotation angle in degrees with (x0, y0, z0) as origin.
+            y-axis-rotation angle in degrees with (cx, cy, cz) as origin.
         psi : float
-            x-axis-rotation angle in degrees with (x0, y0, z0) as origin.
+            x-axis-rotation angle in degrees with (cx, cy, cz) as origin.
         """
-        self.x0: float = x0
-        self.y0: float = y0
-        self.z0: float = z0
+        self.cx: float = cx
+        self.cy: float = cy
+        self.cz: float = cz
         self.dx: float = dx
         self.dy: float = dy
         self.dz: float = dz
-        self.nx: int = nx
-        self.ny: int = ny
-        self.nz: int = nz
-        if rot_center is not None:
-            self.rot_center: Tuple[float, float, float] = rot_center
-        else:
-            self.rot_center = (x0, y0, z0)
+        self.nx: int = int(nx)
+        self.ny: int = int(ny)
+        self.nz: int = int(nz)
         self.theta = theta
         self.phi = phi
         self.psi = psi
 
+    def __str__(self) -> str:
+        """Return a string representation of the instance."""
+        return (
+            "RectilinearGrid(\n"
+            f"\tcx = {self.cx}\n"
+            f"\tcy = {self.cy}\n"
+            f"\tcz = {self.cz}\n"
+            f"\tdx = {self.dx}\n"
+            f"\tdy = {self.dy}\n"
+            f"\tdz = {self.dz}\n"
+            f"\tnx = {self.nx}\n"
+            f"\tny = {self.ny}\n"
+            f"\tnz = {self.nz}\n"
+            f"\ttheta = {self.theta}\n"
+            f"\tphi = {self.phi}\n"
+            f"\tpsi = {self.psi}\n"
+            ")"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            "RectilinearGrid("
+            f"center = {self.rot_center}, "
+            f"origin = {self.origin}, "
+            f"dx = {self.dx}, "
+            f"dy = {self.dy}, "
+            f"dz = {self.dz}, "
+            f"nx = {self.nx}, "
+            f"ny = {self.ny}, "
+            f"nz = {self.nz}, "
+            f"x0 = {self.x0}, "
+            f"y0 = {self.y0}, "
+            f"z0 = {self.z0}, "
+            f"theta = {self.theta}, "
+            f"phi = {self.phi}, "
+            f"psi = {self.psi})"
+        )
+
+    @property
+    def rot_center(self) -> Tuple[float, float, float]:
+        """Rotation pivot — always the grid centre."""
+        return (self.cx, self.cy, self.cz)
+
+    @property
+    def _local_origin(self) -> np.ndarray:
+        """Corner origin in the LOCAL (unrotated) frame, relative to centre.
+
+        Returns
+        -------
+        np.ndarray, shape (3,)
+            Offset from centre to the smallest corner.
+        """
+        return np.array(
+            [
+                -self.nx * self.dx / 2.0,
+                -self.ny * self.dy / 2.0,
+                -self.nz * self.dz / 2.0,
+            ]
+        )
+
     @property
     def origin(self) -> Tuple[float, float, float]:
-        """Non rotated origin coords."""
-        return (self.x0, self.y0, self.z0)
+        """Corner origin in WORLD space (smallest corner after rotation).
+
+        Returns
+        -------
+        tuple of (float, float, float)
+            ``(x0, y0, z0)`` in world coordinates.
+        """
+        world = self._rotate_coords(
+            self._local_origin.reshape(3, 1) + np.array([[self.cx, self.cy, self.cz]]).T
+        )
+        return (float(world[0, 0]), float(world[1, 0]), float(world[2, 0]))
+
+    @property
+    def x0(self) -> float:
+        return self.origin[0]
+
+    @property
+    def y0(self) -> float:
+        return self.origin[1]
+
+    @property
+    def z0(self) -> float:
+        return self.origin[2]
 
     @property
     def shape(self) -> Tuple[int, int, int]:
@@ -387,52 +464,54 @@ class RectilinearGrid(Grid):
 
     @property
     def _non_rotated_origin_coords(self) -> NDArrayFloat:
-        """
-        Return the grid meshes origin coordinates with shape (3, nx, ny, nz).
-
-        Note
-        ----
-        Rotation is not applied.
-        """
-        return (
+        """Grid cell corner coordinates in the unrotated frame."""
+        local = (
             self.indices.reshape(3, -1, order="F")
-            * np.array([[self.dx, self.dy, self.dz]], dtype=np.float64).T
-            + np.array([[self.x0, self.y0, self.z0]]).T
-        ).reshape(3, self.nx, self.ny, self.nz, order="F")
+            * np.array([[self.dx, self.dy, self.dz]]).T
+            + self._local_origin.reshape(3, 1)  # relative to centre
+            + np.array([[self.cx, self.cy, self.cz]]).T  # shift to world
+        )
+        return local.reshape(3, self.nx, self.ny, self.nz, order="F")
 
-    def _rotate_coords(self, non_rotated_coords: NDArrayFloat) -> NDArrayFloat:
+    def _rotate_coords(self, coords: NDArrayFloat) -> NDArrayFloat:
         """
         Rotate the coordinates.
 
         Parameters
         ----------
-        non_rotated_coords: NDArrayFloat
+        coords: NDArrayFloat
             Expected shape (3, nx, ny, nz)
-
-        Note
-        ----
-        The rotation with the matrices multiplication is done relatively to point
-        (0.0, 0.0, 0.0), so we should remove the origin point (x0, y0, z0) before the
-        rotation and add it afterward.
 
         Return
         ------
         NDArrayFloat
             The rotated coordinates with shape (3, nx, ny, nz).
         """
-        return (
-            np.dot(
-                _rotation_x(np.deg2rad(self.psi)),
-                np.dot(
-                    _rotation_y(np.deg2rad(self.phi)),
-                    np.dot(
-                        _rotation_z(np.deg2rad(self.theta)),
-                        non_rotated_coords.reshape(3, -1, order="F")
-                        - np.array([self.rot_center]).T,
-                    ),
-                ),
-            )
-            + np.array([self.rot_center]).T
+        c = np.array([[self.cx, self.cy, self.cz]]).T
+        flat = coords.reshape(3, -1) - c
+        rotated = (
+            _rotation_x(np.deg2rad(self.psi))
+            @ _rotation_y(np.deg2rad(self.phi))
+            @ _rotation_z(np.deg2rad(self.theta))
+            @ flat
+        ) + c
+        return rotated.reshape(coords.shape)
+
+    def copy(self) -> RectilinearGrid:
+        """Return a deepcopy of the instance."""
+        return RectilinearGrid(
+            cx=self.cx,
+            cy=self.cy,
+            cz=self.cz,
+            dx=self.dx,
+            dy=self.dy,
+            dz=self.dz,
+            nx=self.nx,
+            ny=self.ny,
+            nz=self.nz,
+            theta=self.theta,
+            phi=self.phi,
+            psi=self.psi,
         )
 
     @property
@@ -624,6 +703,49 @@ class RectilinearGrid(Grid):
             _description_
         """
         return make_rlg_spatial_permutation_matrices(self, sub_selection=sub_selection)
+
+    def to_shapely(self, mask: Optional[NDArrayBool] = None) -> shapely.MultiPolygon:
+        """
+        Return a 2d regular grid to 2d shapely polygons.
+
+        Parameters
+        ----------
+        grid : quickpaver.RectilinearGrid
+            The input 2d regular grid.
+        mask : Optional[NDArrayBool], optional
+            Grid cells to exclude, by default None
+
+        Returns
+        -------
+        shapely.MultiPolygon
+            - Square panels as a MultiPolygon
+        """
+        half_dx = self.dx / 2.0
+        half_dy = self.dy / 2.0
+        # the grid x-y coordinates in the same order as in the dataframe
+        grid_2d_cc = self.non_rot_center_coords_2d.reshape(2, -1).T
+
+        if mask is None:
+            _mask = slice(None)
+        else:
+            _mask = mask
+
+        inside_points = grid_2d_cc[_mask]
+
+        return shapely.affinity.rotate(  # ty:ignore[possibly-missing-submodule]
+            shapely.MultiPolygon(
+                shapely.box(
+                    inside_points[:, 0] - half_dx,
+                    inside_points[:, 1] - half_dy,
+                    inside_points[:, 0] + half_dx,
+                    inside_points[:, 1] + half_dy,
+                )
+            ),
+            angle=self.theta,
+            origin=list(
+                self.rot_center[:2]
+            ),  # must convert to a list to avoid == issues with numpy
+        )
 
 
 def get_vertices_centroid(
@@ -1131,9 +1253,9 @@ def resample_grid(
     _ny = int(max(np.ceil(original_grid.ny * factor_y).item(), 1))
     _nz = int(max(np.ceil(original_grid.nz * factor_z).item(), 1))
     return RectilinearGrid(
-        x0=original_grid.x0,
-        y0=original_grid.y0,
-        z0=original_grid.z0,
+        cx=original_grid.cx,
+        cy=original_grid.cy,
+        cz=original_grid.cz,
         dx=original_grid.nx * original_grid.dx / _nx,
         dy=original_grid.ny * original_grid.dy / _ny,
         dz=original_grid.nz * original_grid.dz / _nz,

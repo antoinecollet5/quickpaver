@@ -96,7 +96,7 @@ def test_non_rotated_rlgrid_bounds() -> None:
 
     # with non zero origin
     rlgrid = RectilinearGrid(
-        nx=10, ny=10, nz=5, dx=2.1, dy=5.6, dz=9.0, x0=-100.0, y0=25.0, z0=-60.0
+        cx=-89.5, cy=53.0, cz=-37.5, nx=10, ny=10, nz=5, dx=2.1, dy=5.6, dz=9.0
     )
     np.testing.assert_equal(
         rlgrid.bounds, np.array([[-100.0, -79.0], [25.0, 81.0], [-60.0, -15.0]])
@@ -114,15 +114,15 @@ def test_non_rotated_rlgrid_bounds() -> None:
 def test_MCI01_rlgrid_bounds() -> None:
     # with non zero origin
     mci01_grid = RectilinearGrid(
+        cx=1.36801258e05,
+        cy=1.38457458e05,
+        cz=-9.45000000e01,
         nx=45,
         ny=47,
         nz=27,
         dx=5.0,
         dy=5.0,
         dz=1.0,
-        x0=136762.58,
-        y0=138299.45,
-        z0=-108.00,
         theta=30.0,
     )
     assert mci01_grid.n_grid_cells == 57105
