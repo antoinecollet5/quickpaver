@@ -3,6 +3,6 @@
 
 """Get the metadata."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "Antoine Collet"
 __email__ = "antoine.collet5@gmail.com"
