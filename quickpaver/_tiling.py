@@ -106,32 +106,63 @@ def gen_polygon(
     anisotropy_ratio: float = 1.0,
 ) -> shapely.Polygon:
     """
-    _summary_
+    Generate a reference polygon centred at the origin.
+
+    The generated polygon is centred on ``(0, 0)`` and aligned with the
+    coordinate axes. The polygon can be used as a base tile geometry before
+    translation, rotation, or placement on a tiling lattice.
+
+    ``anisotropy_ratio`` scales the polygon along the y-axis only. A value of
+    ``1.0`` gives an isotropic polygon. Values different from ``1.0`` stretch or
+    compress the polygon vertically while preserving the x-coordinates.
 
     Parameters
     ----------
-    poly_type : PolygonType
-        Type of tile geometry.  See :class:`PolygonType` for the
-        available options (``HEXAGON``, ``TRIANGLE``, ``RECTANGLE``).
+    poly_type : Union[PolygonType, str]
+        Type of polygon to generate. Supported values are:
 
+        - :attr:`PolygonType.TRIANGLE`
+        - :attr:`PolygonType.RECTANGLE`
+        - :attr:`PolygonType.HEXAGON`
+
+        Equivalent string values such as ``"triangle"``, ``"rectangle"``, and
+        ``"hexagon"`` are also accepted if compatible with :class:`PolygonType`.
     edge_length : float, optional
-        Edge length for the base polygon. The default is 1.0.
-    edge_length: float
-        Edge length for the base polygon.
-        E.g., choosing :py:attr:`PolygonType.RECTANGLE` with `anisotropy_ratio` = 2
-        results in rectangles with scale (1.0, 2.0).
+        Base edge length of the generated polygon, by default 1.0.
+
+        For rectangles, this corresponds to the rectangle width. The rectangle
+        height is ``edge_length * anisotropy_ratio``.
+
+        For triangles, this controls the side length of the isotropic reference
+        triangle before vertical anisotropic scaling.
+
+        For hexagons, this controls the circumradius of the isotropic reference
+        hexagon, which is equal to the side length for a regular hexagon.
+    anisotropy_ratio : float, optional
+        Scaling factor applied along the y-axis, by default 1.0. For example,
+        ``anisotropy_ratio=2.0`` produces polygons twice as tall as their
+        isotropic counterpart.
 
     Returns
     -------
     shapely.Polygon
-        A polygon centred at ``(0, 0)`` with vertices ordered
-        counter-clockwise.
+        Polygon centred at ``(0, 0)`` with vertices ordered counter-clockwise.
 
     Raises
     ------
     ValueError
-        If *poly_type* is not a recognised :class:`PolygonType` member
-        or valid string alias.
+        If ``poly_type`` is not a recognised :class:`PolygonType` member or
+        valid string value.
+
+    Notes
+    -----
+    The triangle and hexagon are generated from angular coordinates around the
+    origin. The rectangle is generated directly from its half-width and
+    half-height.
+
+    This function does not validate that ``edge_length`` or
+    ``anisotropy_ratio`` are strictly positive. Callers that require positive
+    dimensions should validate inputs before calling this function.
     """
     if poly_type == PolygonType.TRIANGLE:
         return shapely.Polygon(
