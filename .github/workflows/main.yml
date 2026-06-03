@@ -37,7 +37,7 @@ jobs:
 
       - name: Upload pre-commit report
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: pre-commit-report
           path: pre-commit-report
@@ -113,7 +113,7 @@ jobs:
         run: pip install coverage
 
       - name: Download all coverage artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: coverage-data
 
@@ -126,7 +126,7 @@ jobs:
           coverage xml
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
