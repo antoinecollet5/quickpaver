@@ -46,7 +46,7 @@ quickpaver = ["data/*.geojson"]
 version = { attr = "quickpaver.__about__.__version__" }
 
 [project.optional-dependencies]
-all = ['quickpaver[install, lint, tests, examples, docs]']
+all = ['quickpaver[install, lint, tests, examples, docs, pyvista]']
 docs = [
     "quickpaver[examples]",
     "sphinx<9",
@@ -68,10 +68,15 @@ tests = [
     "pytest-cookies",
     "coverage",
 ]
-examples = ["matplotlib", "marimo", "nested_grid_plotter>=2.1.0"]
-scikit_sparse_old = ["scikit-sparse<0.5.0"]
+examples = [
+    "matplotlib",
+    "marimo",
+    "nested_grid_plotter>=2.1.0",
+    "pyvista[all]",
+]
 lint = ["pre-commit", "pre-commit-hooks", "codespell", "ruff", "ty"]
 install = ["pip", "wheel"]
+pyvista = ["pyvista"]
 
 [tool.ruff]
 lint.select = [
