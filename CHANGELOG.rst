@@ -2,6 +2,15 @@
 Changelog
 ==============
 
+0.3.1 (2026-06-16)
+------------------
+
+* DOCS: improved ``gen_polygon`` docstring.
+* FIX: when no ``alignment_point``is provided, the grid positioning is consistent with
+  v0.2.x for retro-compatibility.
+* TEST: updated github actions in CI.
+
+
 0.3.0 (2026-06-03)
 ------------------
 
