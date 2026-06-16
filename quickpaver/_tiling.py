@@ -253,6 +253,33 @@ def rectangular_grid_adjacency_masked(
     return dict(adj)
 
 
+def _get_non_aligned_rect_centers(
+    x_min: float, x_max: float, y_min: float, y_max: float, h_step: float, v_step: float
+) -> NDArrayFloat:
+
+    # number of columns of polygons
+    nh: int = math.ceil((x_max - x_min) / h_step)
+    # number of rows of polygons
+    nv = math.ceil((y_max - y_min) / v_step)
+
+    # compute the difference between the x coverage of the polygons and the required
+    #  x, y range
+    x_delta = nh * h_step - (x_max - x_min)
+    y_delta = nv * v_step - (y_max - y_min)
+
+    # compute the grid start
+    h_start = x_min - x_delta / 2.0
+    v_start = y_min - y_delta / 2.0
+
+    # compute the polygon centers
+    return np.array(
+        np.meshgrid(
+            np.linspace(h_start + h_step / 2.0, h_start + (nh - 0.5) * h_step, nh),
+            np.linspace(v_start + v_step / 2.0, v_start + (nv - 0.5) * v_step, nv),
+        )
+    )
+
+
 def gen_rectangular_tiling(
     surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
     edge_length: float,
@@ -295,15 +322,24 @@ def gen_rectangular_tiling(
     v_step = edge_length * anisotropy_ratio  #  Vertical step (height of a hexagon)
     h_step = edge_length  # Horizontal step (width of a hexagon)
 
-    b1 = np.array([h_step, 0.0])
-    b2 = np.array([0.0, v_step])
-
-    anchor = (
-        np.asarray(alignment_point, dtype=float).ravel()[:2]
-        if alignment_point is not None
-        else np.array([x_min, y_min])
-    )
-    centers = _lattice_centres(surface_to_cover.bounds, b1, b2, anchor)
+    if alignment_point is None:
+        centers = _get_non_aligned_rect_centers(
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+            h_step=h_step,
+            v_step=v_step,
+        )
+    else:
+        b1 = np.array([h_step, 0.0])
+        b2 = np.array([0.0, v_step])
+        anchor = (
+            np.asarray(alignment_point, dtype=float).ravel()[:2]
+            if alignment_point is not None
+            else np.array([x_min, y_min])
+        )
+        centers = _lattice_centres(surface_to_cover.bounds, b1, b2, anchor)
 
     verts = np.array(
         gen_polygon(
@@ -386,6 +422,38 @@ def hexagonal_grid_adjacency_masked(
     return dict(adj)
 
 
+def _get_non_aligned_hex_centers(
+    x_min: float, x_max: float, y_min: float, y_max: float, h_step: float, v_step: float
+) -> NDArrayFloat:
+
+    # number of columns of polygons
+    nh: int = math.ceil((x_max - x_min) / h_step)
+    # number of rows of polygons
+    nv = math.ceil((y_max - y_min) / v_step) + 1
+
+    # compute the difference between the x coverage of the polygons and the required
+    # x, y range
+    x_delta = nh * h_step - (x_max - x_min)
+    y_delta = nv * v_step - (y_max - y_min)
+
+    # compute the grid start
+    h_start = x_min - x_delta / 2.0
+    v_start = y_min - y_delta / 2.0
+
+    # compute the polygon centers
+    centers = np.array(
+        np.meshgrid(
+            np.linspace(h_start + h_step / 2.0, h_start + (nh - 0.5) * h_step, nh),
+            np.linspace(v_start + v_step / 2.0, v_start + (nv - 0.5) * v_step, nv),
+        )
+    )
+
+    # shift half of the columns down
+    centers[1, :, ::2] += v_step / 2.0
+
+    return centers
+
+
 def gen_hexagonal_tiling(
     surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
     edge_length: float,
@@ -431,16 +499,26 @@ def gen_hexagonal_tiling(
     )  #  Vertical step (height of a hexagon)
     h_step = 1.5 * edge_length  # Horizontal step (width of a hexagon)
 
-    # even columns shifted up by v_step/2 → b1 carries the -v_step/2 stagger
-    b1 = np.array([h_step, -v_step / 2.0])
-    b2 = np.array([0.0, v_step])
+    if alignment_point is None:
+        centers = _get_non_aligned_hex_centers(
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+            h_step=h_step,
+            v_step=v_step,
+        )
+    else:
+        # even columns shifted up by v_step/2 → b1 carries the -v_step/2 stagger
+        b1 = np.array([h_step, -v_step / 2.0])
+        b2 = np.array([0.0, v_step])
 
-    anchor = (
-        np.asarray(alignment_point, dtype=float).ravel()[:2]
-        if alignment_point is not None
-        else np.array([x_min, y_min])
-    )
-    centers = _lattice_centres(surface_to_cover.bounds, b1, b2, anchor)
+        anchor = (
+            np.asarray(alignment_point, dtype=float).ravel()[:2]
+            if alignment_point is not None
+            else np.array([x_min, y_min])
+        )
+        centers = _lattice_centres(surface_to_cover.bounds, b1, b2, anchor)
 
     # vertices for one polygon
     verts = np.array(
