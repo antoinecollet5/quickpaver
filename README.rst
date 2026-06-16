@@ -267,12 +267,28 @@ Now let's try with triangles
     )
     plot_helper(grid_triangles_rot_no_ani, france_and_corsica)
 
-.. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_triangles_no_rot_ani.png
+.. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_triangles_rot_no_ani.png
    :alt: grid_triangles_no_rot_ani
    :width: 60%
    :align: center
 
 Same with anisotropy:
+
+.. code-block:: python
+
+    grid_triangles_no_rot_ani, _adj = quickpaver.gen_polygonal_tiling(
+        france_and_corsica,
+        poly_type=quickpaver.PolygonType.TRIANGLE,
+        edge_length=500.0,
+        anisotropy_ratio=3.0,
+        rot_deg=0.0,
+    )
+    plot_helper(grid_triangles_no_rot_ani, france_and_corsica)
+
+.. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_triangles_no_rot_ani.png
+   :alt: grid_triangles_no_rot_ani
+   :width: 60%
+   :align: center
 
 .. code-block:: python
 
@@ -320,7 +336,7 @@ the vertices and the centers is also provided)
     plotter2.axes[0].legend()
     plotter2
 
-.. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_hexagons_france_rot_vertices.png.png
+.. figure:: https://raw.githubusercontent.com/antoinecollet5/quickpaver/master/_static/grid_hexagons_france_rot_vertices.png
    :alt: grid_hexagons_france_rot_vertices
    :width: 60%
    :align: center
