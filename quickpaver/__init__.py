@@ -97,6 +97,7 @@ binary dilation, resampling, and conservative or duplicative array upsampling.
    resample_grid
    duplicative_upsample
    conservative_upsample
+   intersects_mask
 
 """
 
@@ -131,6 +132,7 @@ from quickpaver._tiling import (
     gen_polygonal_tiling,
     gen_rectangular_tiling,
     gen_triangular_tiling,
+    intersects_mask,
 )
 from quickpaver._transfer_matrix import compute_transfer_matrix
 from quickpaver.data import (
@@ -174,4 +176,5 @@ __all__ = [
     "extract_tiling_vertices",
     "compute_transfer_matrix",
     "get_array_borders_selection",
+    "intersects_mask",
 ]

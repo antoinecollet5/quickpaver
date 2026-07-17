@@ -72,6 +72,7 @@ def compute_transfer_matrix(
     - STRtree spatial indexing
     - vectorized Shapely intersection operations
     - sparse COO matrix assembly
+
     """
 
     # -----------------------------------------------------------------
@@ -90,6 +91,10 @@ def compute_transfer_matrix(
 
     n_source: int = len(source_polygons)
     n_target: int = len(target_polygons)
+
+    # Prepared geometries accelerate the exact "intersects" test
+    # performed by the STRtree query below.
+    shapely.prepare(source_polygons)
 
     # -----------------------------------------------------------------
     # Build spatial index on source polygons
@@ -115,19 +120,35 @@ def compute_transfer_matrix(
     source_indices: np.ndarray = pairs[1]
 
     # -----------------------------------------------------------------
-    # Compute vectorized polygon intersections
+    # Compute intersection areas
     # -----------------------------------------------------------------
+
+    # Cheap bounding-box pre-filter to discard pairs that can only
+    # produce a point/line/sliver intersection before paying for
+    # the exact GEOS intersection below.
+    src_bounds = shapely.bounds(source_polygons[source_indices])
+    tgt_bounds = shapely.bounds(target_polygons[target_indices])
+    bbox_dx = np.minimum(src_bounds[:, 2], tgt_bounds[:, 2]) - np.maximum(
+        src_bounds[:, 0], tgt_bounds[:, 0]
+    )
+    bbox_dy = np.minimum(src_bounds[:, 3], tgt_bounds[:, 3]) - np.maximum(
+        src_bounds[:, 1], tgt_bounds[:, 1]
+    )
+    nontrivial = (bbox_dx > 1e-15) & (bbox_dy > 1e-15)
+
+    source_indices = source_indices[nontrivial]
+    target_indices = target_indices[nontrivial]
+
+    # -------------------------------------------------------------
+    # Compute vectorized polygon intersections
+    # -------------------------------------------------------------
 
     intersections: np.ndarray = shapely.intersection(
         source_polygons[source_indices],
         target_polygons[target_indices],
     )
 
-    # -----------------------------------------------------------------
-    # Compute intersection areas
-    # -----------------------------------------------------------------
-
-    intersection_areas: np.ndarray = shapely.area(intersections)
+    intersection_areas = shapely.area(intersections)
 
     # Remove empty / numerical-noise intersections
     valid_mask: np.ndarray = intersection_areas > 1e-15
