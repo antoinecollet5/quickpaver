@@ -51,7 +51,7 @@ jobs:
         numba-variant: ["with-numba", "without-numba"]
 
     env:
-      NUMBA_DISABLE_JIT: ${{ matrix.numba-variant == 'without-numba' && '1' || '0' }}
+      NUMBA_DISABLE_JIT: 1
 
     needs:
       - static_analysis
