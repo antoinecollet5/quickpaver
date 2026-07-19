@@ -43,6 +43,7 @@ both the generated polygons and adjacency information between kept tiles.
    gen_polygonal_tiling
    extract_tiling_centers
    extract_tiling_vertices
+   adjacency_by_shared_vertices
 
 Transfer matrices
 ^^^^^^^^^^^^^^^^^
@@ -126,6 +127,7 @@ from quickpaver._grid import (
 )
 from quickpaver._tiling import (
     PolygonType,
+    adjacency_by_shared_vertices,
     extract_tiling_centers,
     extract_tiling_vertices,
     gen_hexagonal_tiling,
@@ -182,4 +184,5 @@ __all__ = [
     "compute_transfer_matrix_rectilinear",
     "get_array_borders_selection",
     "intersects_mask",
+    "adjacency_by_shared_vertices",
 ]
