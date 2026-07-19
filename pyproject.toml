@@ -46,7 +46,8 @@ quickpaver = ["data/*.geojson"]
 version = { attr = "quickpaver.__about__.__version__" }
 
 [project.optional-dependencies]
-all = ['quickpaver[install, lint, tests, examples, docs, pyvista]']
+numba = ["numba"]
+all = ['quickpaver[install, numba, lint, tests, examples, docs, pyvista]']
 docs = [
     "quickpaver[examples]",
     "sphinx<9",

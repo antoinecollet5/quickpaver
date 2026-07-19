@@ -37,7 +37,7 @@ jobs:
 
       - name: Upload pre-commit report
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: pre-commit-report
           path: pre-commit-report
@@ -48,9 +48,10 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        numba-variant: ["with-numba", "without-numba"]
 
     env:
-      NUMBA_DISABLE_JIT: 1
+      NUMBA_DISABLE_JIT: ${{ matrix.numba-variant == 'without-numba' && '1' || '0' }}
 
     needs:
       - static_analysis
@@ -68,14 +69,14 @@ jobs:
           uv venv
           uv pip install -e .[all]
 
-      - name: Debug pytest plugins
+      - name: Uninstall numba for 'without-numba' variant
+        if: matrix.numba-variant == 'without-numba'
         run: |
-          uv run pytest --trace-config | grep cov || true
-
+          uv pip uninstall -y numba
 
       - name: Run tests with coverage
         env:
-          COVERAGE_FILE: .coverage.${{ matrix.python-version }}
+          COVERAGE_FILE: .coverage.${{ matrix.python-version }}.${{ matrix.numba-variant }}
         run: |
           uv run pytest \
             --cov=quickpaver \
@@ -88,10 +89,10 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
-          name: coverage-${{ matrix.python-version }}
-          path: ${{ github.workspace }}/.coverage.${{ matrix.python-version }}
+          name: coverage-${{ matrix.python-version }}-${{ matrix.numba-variant }}
+          path: ${{ github.workspace }}/.coverage.${{ matrix.python-version }}.${{ matrix.numba-variant }}
           include-hidden-files: true
           if-no-files-found: error
 
@@ -113,20 +114,27 @@ jobs:
         run: pip install coverage
 
       - name: Download all coverage artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           path: coverage-data
 
+      - name: List downloaded coverage files
+        run: |
+          echo "=== All downloaded files ==="
+          find coverage-data -type f | head -20
+          echo ""
+          echo "=== Coverage files ==="
+          find coverage-data -name '.coverage*' -print
+
       - name: Combine coverage
         run: |
-          find coverage-data -name '.coverage*' -print
           coverage combine $(find coverage-data -name '.coverage*')
           coverage report -m
           coverage html
           coverage xml
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
