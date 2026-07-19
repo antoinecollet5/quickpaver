@@ -38,15 +38,6 @@ from shapely.strtree import STRtree
 _HAS_NUMBA = False
 
 try:
-    import numba
-
-    _HAS_NUMBA = True
-except ModuleNotFoundError:
-    numba
-
-_HAS_NUMBA = False
-try:
-    import numba
     from numba import njit, prange
 
     _HAS_NUMBA = True
