@@ -49,7 +49,7 @@ except ModuleNotFoundError:
         def decorator(func):
             return func
 
-        return decorator if not callable(args[0]) else args[0]
+        return decorator
 
     # Fallback: prange is just range
     prange = range  # ty:ignore[invalid-assignment]
