@@ -259,13 +259,13 @@ def compute_transfer_matrix_rectilinear(
     source_dy: float,
     source_nx: int,
     source_ny: int,
-    source_angle: float,
+    source_angle_deg: float,
     target_center: np.ndarray,
     target_dx: float,
     target_dy: float,
     target_nx: int,
     target_ny: int,
-    target_angle: float,
+    target_angle_deg: float,
     is_sanity_check: bool = False,
 ) -> csc_array:
     """
@@ -279,8 +279,8 @@ def compute_transfer_matrix_rectilinear(
         Cell widths along each grid's local x / y axes.
     source_nx, source_ny, target_nx, target_ny : int
         Number of cells along each grid's local x / y axes.
-    source_angle, target_angle : float
-        Grid rotation angles in **radians** (counter-clockwise from the
+    source_angle_deg, target_angle_deg : float
+        Grid rotation angles in **degrees** (counter-clockwise from the
         world x-axis).
     is_sanity_check : bool, optional
         If *True*, verify that every fully-covered source cell conserves
@@ -304,8 +304,10 @@ def compute_transfer_matrix_rectilinear(
     target_center = np.asarray(target_center, dtype=float)
 
     # ---- check whether the fast separable path applies ----
-    rel_angle = target_angle - source_angle
-    k_exact = rel_angle / (np.pi / 2)
+    source_angle_rad = np.deg2rad(source_angle_deg)
+    target_angle_rad = np.deg2rad(target_angle_deg)
+    rel_angle_rad = target_angle_rad - source_angle_rad
+    k_exact = np.deg2rad(rel_angle_rad) / (np.pi / 2)
     k_round = round(k_exact)
     is_separable = abs(k_exact - k_round) < 1e-9
 
@@ -316,7 +318,7 @@ def compute_transfer_matrix_rectilinear(
             source_dy,
             source_nx,
             source_ny,
-            source_angle,
+            source_angle_rad,
             target_center,
             target_dx,
             target_dy,
@@ -332,13 +334,13 @@ def compute_transfer_matrix_rectilinear(
             source_dy,
             source_nx,
             source_ny,
-            source_angle,
+            source_angle_rad,
             target_center,
             target_dx,
             target_dy,
             target_nx,
             target_ny,
-            target_angle,
+            target_angle_rad,
             is_sanity_check,
         )
 
