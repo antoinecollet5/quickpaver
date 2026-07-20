@@ -290,7 +290,9 @@ def compute_transfer_matrix_rectilinear(
     -------
     scipy.sparse.csc_array
         Shape ``(n_source, n_target)`` with ``n = nx * ny``.
-        Cell ``(i, j)`` maps to linear index ``i * ny + j`` (x-major order).
+        Cell ``(i, j)`` maps to linear index ``j * nx + i`` (Fortran / column-major
+        order, i.e. ``x`` varies fastest — equivalent to
+        ``np.ravel_multi_index((i, j), (nx, ny), order="F")``).
 
     Notes
     -----
@@ -418,7 +420,7 @@ def _separable_transfer(
 
     src_ix = np.repeat(is_x, ny_pairs)
     src_jy = np.tile(is_y, nx_pairs)
-    src_lin = src_ix * source_ny + src_jy
+    src_lin = src_jy * source_nx + src_ix
 
     if sx_is_tgt_y:
         tgt_jy = np.repeat(it_x_orig, ny_pairs)
@@ -427,7 +429,7 @@ def _separable_transfer(
         tgt_ix = np.repeat(it_x_orig, ny_pairs)
         tgt_jy = np.tile(it_y_orig, nx_pairs)
 
-    tgt_lin = tgt_ix * target_ny + tgt_jy
+    tgt_lin = tgt_jy * target_nx + tgt_ix
     weights = np.repeat(ox, ny_pairs) * np.tile(oy, nx_pairs) / (source_dx * source_dy)
 
     mat = coo_array(
@@ -546,8 +548,8 @@ def _nonseparable_transfer(
     ly = (np.arange(target_ny) - (target_ny - 1) / 2) * target_dy
     tcx_grid = origin_x + cr * kx[:, None] - sr * ly[None, :]
     tcy_grid = origin_y + sr * kx[:, None] + cr * ly[None, :]
-    tcx_flat = tcx_grid.ravel()
-    tcy_flat = tcy_grid.ravel()
+    tcx_flat = tcx_grid.ravel(order="F")
+    tcy_flat = tcy_grid.ravel(order="F")
 
     # -- vectorised candidate-pair enumeration --
     src_x0, src_y0 = src_x_edges[0], src_y_edges[0]
@@ -595,7 +597,7 @@ def _nonseparable_transfer(
     src_i = np.repeat(i_lo, counts_per_tgt) + local_pos // rep_nj
     src_j = np.repeat(j_lo, counts_per_tgt) + local_pos % rep_nj
 
-    src_lin = src_i * source_ny + src_j
+    src_lin = src_j * source_nx + src_i
     tgt_lin = tgt_flat_idx
 
     pair_xmin = src_x_edges[src_i]

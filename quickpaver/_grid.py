@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Antoine COLLET
 
-"""Rectilinear grid."""
+"""Rectilinear grid.
+
+The flattened node-numbering convention (``node_number = ix + iy*nx +
+iz*ny*nx``) and every public array shape are unchanged from the original
+implementation.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,7 @@ import matplotlib as mpl
 import matplotlib.path
 import numpy as np
 import shapely
-from scipy.sparse import csc_array, lil_array
+from scipy.sparse import coo_array, csc_array
 
 from quickpaver._types import Int, NDArrayBool, NDArrayFloat, NDArrayInt
 
@@ -175,6 +180,24 @@ class Grid(abc.ABC):
         ...
 
 
+def _as_full_slice_tuple(
+    span: Union[NDArrayInt, Tuple[slice, ...], slice], ndims: int
+) -> Optional[Tuple[slice, ...]]:
+    """Return ``span`` normalized to a tuple of ``ndims`` slices, or ``None``.
+
+    ``None`` is returned whenever ``span`` isn't expressible as plain slices
+    (e.g. it's a boolean mask or an integer index array), signalling that the
+    caller must fall back to a general (dense-array) selection strategy.
+    """
+    if isinstance(span, slice):
+        span = (span,) + (slice(None),) * (ndims - 1)
+    if not isinstance(span, tuple) or len(span) != ndims:
+        return None
+    if not all(isinstance(s, slice) for s in span):
+        return None
+    return span  # ty:ignore[invalid-return-type]
+
+
 def span_to_node_numbers_2d(
     span: Union[NDArrayInt, Tuple[slice, slice], slice],
     nx: int,
@@ -207,16 +230,31 @@ def span_to_node_numbers_2d(
 
     Notes
     -----
-    The grid follows the internal ``(x, y)`` array convention, meaning that the
-    temporary selection array has shape ``(nx, ny)`` rather than the image-style
-    convention ``(ny, nx)``.
-
     The flattened numbering convention is:
 
     ``node_number = ix + iy * nx``
 
     This function operates on grid cells, not on grid vertices.
+
+    When ``span`` is made only of ``slice`` objects (the common case for
+    finite-volume neighbour spans), indices are derived directly from the
+    slice bounds with :func:`numpy.meshgrid` instead of materialising a full
+    ``(nx, ny)`` dense array and scanning it with :func:`numpy.nonzero`. This
+    avoids an ``O(nx*ny)`` allocation and scan whenever the selection can be
+    described analytically. Non-slice selections (boolean masks, integer
+    index arrays) fall back to the dense-array approach.
     """
+    slices = _as_full_slice_tuple(span, ndims=2)
+    if slices is not None:
+        sx, sy = slices
+        rx = range(*sx.indices(nx))
+        ry = range(*sy.indices(ny))
+        ix_grid, iy_grid = np.meshgrid(rx, ry, indexing="ij")
+        return np.asarray(
+            rlg_idx_to_nn(ix_grid.reshape(-1), nx=nx, iy=iy_grid.reshape(-1), ny=ny),
+            dtype=np.int32,
+        )
+
     _a = np.zeros((nx, ny))
     _a[span] = 1.0
     row, col = np.nonzero(_a)
@@ -259,15 +297,40 @@ def span_to_node_numbers_3d(
 
     Notes
     -----
-    The grid follows the internal ``(x, y, z)`` array convention, meaning that
-    the temporary selection array has shape ``(nx, ny, nz)``.
-
     The flattened numbering convention is:
 
     ``node_number = ix + iy * nx + iz * ny * nx``
 
     This function operates on grid cells, not on grid vertices.
+
+    When ``span`` is made only of ``slice`` objects (the common case for
+    finite-volume neighbour spans, e.g. ``(slice(0, n-1), slice(None),
+    slice(None))``), indices are derived directly from the slice bounds with
+    :func:`numpy.meshgrid` instead of materialising a full ``(nx, ny, nz)``
+    dense array and scanning it with :func:`numpy.nonzero`. This avoids an
+    ``O(nx*ny*nz)`` allocation and scan whenever the selection can be
+    described analytically, which is significantly faster for large grids.
+    Non-slice selections (boolean masks, integer index arrays) fall back to
+    the dense-array approach.
     """
+    slices = _as_full_slice_tuple(span, ndims=3)
+    if slices is not None:
+        sx, sy, sz = slices
+        rx = range(*sx.indices(nx))
+        ry = range(*sy.indices(ny))
+        rz = range(*sz.indices(nz))
+        ix_grid, iy_grid, iz_grid = np.meshgrid(rx, ry, rz, indexing="ij")
+        return np.asarray(
+            rlg_idx_to_nn(
+                ix_grid.reshape(-1),
+                nx=nx,
+                iy=iy_grid.reshape(-1),
+                ny=ny,
+                iz=iz_grid.reshape(-1),
+            ),
+            dtype=np.int32,
+        )
+
     _a = np.zeros((nx, ny, nz))
     _a[span] = 1.0
     ix, iy, iz = np.nonzero(_a)
@@ -288,6 +351,11 @@ def get_array_borders_selection(nx: int, ny: int) -> NDArrayBool:
         Number of grid cells along the x axis.
     ny: int
         Number of grid cells along the y axis.
+
+    Returns
+    -------
+    NDArrayBool
+        Boolean array with shape ``(nx, ny)``.
     """
     border = np.zeros((nx, ny), dtype=np.bool_)
 
@@ -413,6 +481,15 @@ class RectilinearGrid(Grid):
 
     This class uses ``__slots__`` and therefore does not expose an instance
     ``__dict__``. Only the attributes listed in ``__slots__`` can be assigned.
+
+    Per-cell coordinate/index stacks (``indices``, ``origin_coords``,
+    ``center_coords``, ...) keep the natural ``(3, nx, ny, nz)`` public
+    shape. Internally they are built as ``(3, nz, ny, nx)`` C-contiguous
+    arrays and exposed via a zero-copy transpose view (see the module
+    docstring and :meth:`_grid_shaped_view`), so flattening them with
+    ``.reshape(3, -1, order="F")`` to get node-number order
+    (``node_number = ix + iy*nx + iz*ny*nx``) is free instead of requiring a
+    copy.
     """
 
     __slots__ = (
@@ -620,22 +697,58 @@ class RectilinearGrid(Grid):
 
     @property
     def indices(self) -> NDArrayInt:
-        """Return the grid indices with shape (3, nx, ny, nz)."""
-        return np.asarray(
-            np.meshgrid(range(self.nx), range(self.ny), range(self.nz), indexing="ij"),
-            dtype=np.int32,
+        """Return the grid indices with shape (3, nx, ny, nz).
+
+        Note
+        ----
+        Internally this is built as a C-contiguous ``(3, nz, ny, nx)`` stack
+        and exposed as a ``(3, nx, ny, nz)`` *view* via :func:`numpy.transpose`
+        (metadata-only, no data copy). This keeps the natural, intuitive
+        public shape — matching every other x/y/z-ordered convention in this
+        module — while still allowing ``.reshape(3, -1, order="F")`` to
+        flatten it into node-number order (x fastest) as a zero-copy view
+        instead of the copy a plain ``(3, nx, ny, nz)`` C-contiguous array
+        would require. See :func:`_grid_shaped_view` for the general-purpose
+        version of this trick used throughout the class.
+        """
+        iz, iy, ix = np.meshgrid(
+            range(self.nz), range(self.ny), range(self.nx), indexing="ij"
         )
+        stacked = np.asarray([ix, iy, iz], dtype=np.int32)  # shape (3, nz, ny, nx)
+        return stacked.transpose(0, 3, 2, 1)  # shape (3, nx, ny, nz), zero-copy view
+
+    def _grid_shaped_view(self, flat: NDArrayFloat) -> NDArrayFloat:
+        """Reshape a flat ``(3, n_grid_cells)`` array to ``(3, nx, ny, nz)``.
+
+        This is the zero-copy counterpart to
+        ``flat.reshape(3, self.nx, self.ny, self.nz, order="F")``: reshaping
+        a freshly-computed, C-contiguous ``(3, N)`` array directly into
+        ``(3, nx, ny, nz)`` with ``order="F"`` forces a real copy, because
+        Fortran order reads the *first* axis fastest while the source memory
+        has the *last* axis fastest. Reshaping into the reversed
+        ``(3, nz, ny, nx)`` shape first is a free view (default C order
+        matches the source memory exactly), and the subsequent
+        ``transpose`` back to the natural ``(3, nx, ny, nz)`` shape is
+        metadata-only. The result is indistinguishable from a "real"
+        ``(3, nx, ny, nz)`` array to calling code — including a later
+        ``.reshape(3, -1, order="F")`` to flatten it back, which stays a
+        zero-copy view too.
+        """
+        return flat.reshape(3, self.nz, self.ny, self.nx).transpose(0, 3, 2, 1)
 
     @property
     def _non_rotated_origin_coords(self) -> NDArrayFloat:
-        """Grid cell corner coordinates in the unrotated frame."""
+        """Grid cell corner coordinates in the unrotated frame.
+
+        Shape ``(3, nx, ny, nz)``.
+        """
         local = (
-            self.indices.reshape(3, -1, order="F")
+            self.indices.reshape(3, -1, order="F")  # zero-copy, see `indices`
             * np.array([[self.dx, self.dy, self.dz]]).T
             + self._local_origin.reshape(3, 1)  # relative to centre
             + np.array([[self.cx, self.cy, self.cz]]).T  # shift to world
         )
-        return local.reshape(3, self.nx, self.ny, self.nz, order="F")
+        return self._grid_shaped_view(local)
 
     def _rotate_coords(self, coords: NDArrayFloat) -> NDArrayFloat:
         """
@@ -644,12 +757,13 @@ class RectilinearGrid(Grid):
         Parameters
         ----------
         coords: NDArrayFloat
-            Expected shape (3, nx, ny, nz)
+            Expected shape (3, nx, ny, nz), or any shape whose first axis
+            has length 3 (e.g. (3, 1) or (3, 8)).
 
         Return
         ------
         NDArrayFloat
-            The rotated coordinates with shape (3, nx, ny, nz).
+            The rotated coordinates, with the same shape as ``coords``.
         """
         c = np.array([[self.cx, self.cy, self.cz]]).T
         flat = coords.reshape(3, -1) - c
@@ -681,42 +795,43 @@ class RectilinearGrid(Grid):
     @property
     def origin_coords(self) -> NDArrayFloat:
         """Return the grid meshes origin coordinates with shape (3, nx, ny, nz)."""
-        return self._rotate_coords(self._non_rotated_origin_coords).reshape(
-            3, self.nx, self.ny, self.nz, order="F"
-        )
+        flat = self._non_rotated_origin_coords.reshape(3, -1, order="F")
+        rotated_flat = self._rotate_coords(flat)
+        return self._grid_shaped_view(rotated_flat)
 
     @property
     def x_indices(self) -> NDArrayInt:
-        """Return the grid meshes x-indices as 1D array."""
-        return self.indices[0].ravel()
+        """Return the grid meshes x-indices as 1D array, in node-number order."""
+        return self.indices[0].reshape(-1, order="F")
 
     @property
     def y_indices(self) -> NDArrayInt:
-        """Return the grid meshes y-indices as 1D array."""
-        return self.indices[1].ravel()
+        """Return the grid meshes y-indices as 1D array, in node-number order."""
+        return self.indices[1].reshape(-1, order="F")
 
     @property
     def z_indices(self) -> NDArrayInt:
-        """Return the grid meshes z-indices as 1D array."""
-        return self.indices[2].ravel()
+        """Return the grid meshes z-indices as 1D array, in node-number order."""
+        return self.indices[2].reshape(-1, order="F")
 
     @property
     def center_coords(self) -> NDArrayFloat:
         """Return the grid meshes center coordinates with shape (3, nx, ny, nz)."""
-        return self._rotate_coords(
-            (
-                self._non_rotated_origin_coords.reshape(3, -1, order="F")
-                + np.array([[self.dx / 2, self.dy / 2, self.dz / 2]]).T
-            )
-        ).reshape(3, self.nx, self.ny, self.nz, order="F")
+        flat = (
+            self._non_rotated_origin_coords.reshape(3, -1, order="F")
+            + np.array([[self.dx / 2, self.dy / 2, self.dz / 2]]).T
+        )
+        rotated_flat = self._rotate_coords(flat)
+        return self._grid_shaped_view(rotated_flat)
 
     @property
     def non_rot_center_coords(self) -> NDArrayFloat:
         """Return the non rotated grid cell center coords with shape (3, nx, ny, nz)."""
-        return (
+        flat = (
             self._non_rotated_origin_coords.reshape(3, -1, order="F")
             + np.array([[self.dx / 2, self.dy / 2, self.dz / 2]]).T
-        ).reshape(3, self.nx, self.ny, self.nz, order="F")
+        )
+        return self._grid_shaped_view(flat)
 
     @property
     def center_coords_2d(self) -> NDArrayFloat:
@@ -737,12 +852,12 @@ class RectilinearGrid(Grid):
         ----
         The opposite vertice is the origin symmetric with respect to the cell center.
         """
-        return self._rotate_coords(
-            (
-                self._non_rotated_origin_coords.reshape(3, -1, order="F")
-                + np.array([[self.dx, self.dy, self.dz]]).T
-            )
-        ).reshape(3, self.nx, self.ny, self.nz, order="F")
+        flat = (
+            self._non_rotated_origin_coords.reshape(3, -1, order="F")
+            + np.array([[self.dx, self.dy, self.dz]]).T
+        )
+        rotated_flat = self._rotate_coords(flat)
+        return self._grid_shaped_view(rotated_flat)
 
     @property
     def bounding_box_vertices_coordinates(self) -> NDArrayFloat:
@@ -882,8 +997,9 @@ class RectilinearGrid(Grid):
         grid : quickpaver.RectilinearGrid
             The input 2d regular grid.
         mask : Optional[NDArrayBool], optional
-            Boolean mask selecting cells to include. Cells equal to ``True``
-            are converted to polygons. If ``None``, all cells are converted.
+            Boolean mask with shape ``(nx, ny)`` selecting cells to include.
+            Cells equal to ``True`` are converted to polygons. If ``None``,
+            all cells are converted.
 
         Returns
         -------
@@ -892,7 +1008,7 @@ class RectilinearGrid(Grid):
         """
         half_dx = self.dx / 2.0
         half_dy = self.dy / 2.0
-        # the grid x-y coordinates in the same order as in the dataframe
+        # the grid x-y coordinates, flattened in node-number order (x fastest)
         grid_2d_cc = self.non_rot_center_coords_2d.reshape(2, -1, order="F").T
 
         if mask is None:
@@ -942,13 +1058,9 @@ class RectilinearGrid(Grid):
         cell_data : Optional[dict[str, Union[NDArrayFloat, NDArrayInt]]], optional
             Optional mapping of cell-data names to arrays. Each array must contain
             exactly ``n_grid_cells`` values, either as a flattened one-dimensional
-            array or as an array with shape ``(nx, ny, nz)``. Arrays are flattened
-            using Fortran order so that their order is consistent with the grid
-            numbering convention:
-
-            ``node_number = ix + iy * nx + iz * ny * nx``
-
-            If ``None``, no cell data are attached. By default ``None``.
+            array (already in node-number order) or as an array with shape
+            ``(nx, ny, nz)`` (the grid's natural axis convention). If ``None``,
+            no cell data are attached. By default ``None``.
         representation : Literal["image", "rectilinear", "structured"], optional
             PyVista representation to return:
 
@@ -1002,6 +1114,13 @@ class RectilinearGrid(Grid):
 
         For ``representation="structured"``, rotations are applied sequentially
         using PyVista as z, then y, then x rotations around ``self.rot_center``.
+
+        VTK/PyVista's cell ordering requires x fastest, then y, then z — the
+        same ``node_number = ix + iy*nx + iz*ny*nx`` convention used
+        throughout this module. A cell-data array passed in with shape
+        ``(nx, ny, nz)`` is flattened with ``order="F"`` to match that order.
+        An array passed in pre-flattened is assumed to already be in
+        node-number order.
         """
         try:
             import pyvista as pv
@@ -1136,6 +1255,7 @@ def _get_vertices_centroid(
 def _get_centroid_voxel_coords(
     vertices: Union[NDArrayFloat, List[Tuple[float, float]]],
     grid: RectilinearGrid,
+    center_coords_2d: Optional[NDArrayFloat] = None,
 ) -> Tuple[Int, Int]:
     """
     For a given convex polygon an a 2D grid, give the centroid voxel.
@@ -1146,18 +1266,27 @@ def _get_centroid_voxel_coords(
         Coords of the convex polygon exterior ring with shape (M, 2)
     grid: RectilinearGrid,
         The grid definition (dimensions, position, etc.).
+    center_coords_2d : Optional[NDArrayFloat], optional
+        Precomputed ``grid.center_coords_2d`` (shape ``(2, nx, ny)``), to
+        avoid recomputing the rotated coordinate grid (which involves a
+        matrix multiply over every cell) when this function is called once
+        per polygon in a loop. If ``None``, it is computed from ``grid``.
+        By default ``None``.
 
     Returns
     -------
     Tuple[int, int]
         x, y coordinates of the centroid voxel.
     """
+    if center_coords_2d is None:
+        center_coords_2d = grid.center_coords_2d
+
     # This works for convex polygons only
     _x, _y = _get_vertices_centroid(vertices)
-    # get the closer integer
-    distances = np.square(grid.center_coords_2d[0].ravel("F") - _x) + np.square(
-        grid.center_coords_2d[1].ravel("F") - _y
-    )
+    # get the closer integer, in node-number (x-fastest) order.
+    cx_flat = center_coords_2d[0].ravel("F")
+    cy_flat = center_coords_2d[1].ravel("F")
+    distances = np.square(cx_flat - _x) + np.square(cy_flat - _y)
     ix, iy, _ = rlg_nn_to_idx(int(np.argmin(distances)), nx=grid.nx, ny=grid.ny)
     return (int(ix), int(iy))
 
@@ -1188,7 +1317,7 @@ def create_selections_array_2d(
     Returns
     -------
     NDArrayInt
-        Grid selections array.
+        Grid selections array with shape ``(nx, ny)``.
     """
     if len(polygons) != len(sel_ids):
         raise ValueError("polygons and sel_ids must have the same length.")
@@ -1317,7 +1446,22 @@ def get_polygon_selection_with_dilation_2d(
     grid: RectilinearGrid,
         The grid definition (dimensions, position, etc.).
     selection: Optional[NDArrayInt]
-        An already existing selection as starting point. The default is None.
+        An already existing selection as starting point, with shape
+        ``(nx, ny)``. The default is None.
+
+    Returns
+    -------
+    NDArrayInt
+        Selection array with shape ``(nx, ny)``.
+
+    Notes
+    -----
+    Each polygon's point-in-polygon containment test against the grid is
+    geometry-only and does not depend on the current selection state, so it
+    is computed once here rather than being recomputed on every dilation
+    iteration (as a naive per-iteration ``matplotlib.path.Path.contains_points``
+    call would do). Only the free-cells part of the domain mask changes
+    between iterations.
     """
     # Start by creating an empty grid with int type
     if selection is None:
@@ -1328,13 +1472,26 @@ def get_polygon_selection_with_dilation_2d(
     # initiate _oldselection variable
     _old_selection = np.zeros_like(_selection)
 
-    # Grid coordinates -> Flat array
-    _grid_coords_2d = grid.center_coords_2d.reshape(2, -1, order="F").T
+    # Grid coordinates -> Flat array (computed once and reused for every
+    # polygon, instead of re-triggering the grid's rotation math each time).
+    _center_coords_2d = grid.center_coords_2d
+    _grid_coords_2d = _center_coords_2d.reshape(2, -1, order="F").T
 
     # Create an initial selection for each cell (only one voxel selected)
     sel_ids = np.arange(len(polygons)) + 1
     for sel_id, vertices in zip(sel_ids, polygons):
-        _selection[_get_centroid_voxel_coords(vertices, grid)] = sel_id
+        ix, iy = _get_centroid_voxel_coords(vertices, grid, _center_coords_2d)
+        _selection[ix, iy] = sel_id
+
+    # Precompute each polygon's containment mask once (geometry-only, does
+    # not depend on the selection state, so it is invariant across dilation
+    # iterations).
+    containment_masks = [
+        mpl.path.Path(vertices)
+        .contains_points(_grid_coords_2d)
+        .reshape(grid.nx, grid.ny, order="F")
+        for vertices in polygons
+    ]
 
     # Perform the dilation iteration by iteration to ensure a better split between
     # the selections.
@@ -1342,12 +1499,16 @@ def get_polygon_selection_with_dilation_2d(
         # Update the old_grid with the new one for the while
         _old_selection = _selection.copy()
         # Perform the dilation for each selection
-        for sel_id, vertices in zip(sel_ids, polygons):
+        free_cells = _get_free_grid_cells(_selection)
+        for sel_id, inside_polygon in zip(sel_ids, containment_masks):
             # The mask is free cells + the contained
-            mask = _get_mask(vertices, _selection, _grid_coords_2d, grid.nx, grid.ny)
+            mask = np.logical_and(inside_polygon, free_cells)
             _selection[
                 binary_dilation(_selection == sel_id, domain_mask=mask, iterations=1)
             ] = sel_id
+            # A cell claimed by sel_id this sweep must stop being "free" for
+            # the remaining polygons processed in this same sweep.
+            free_cells = _get_free_grid_cells(_selection)
     return _selection
 
 
@@ -1395,7 +1556,21 @@ def get_polygon_selection_with_dilation_3d(
     grid: RectilinearGrid
         The grid definition.
     selection: Optional[NDArrayInt]
-        An already existing selection as starting point. The default is None.
+        An already existing selection as starting point, with shape
+        ``(nx, ny, nz)``. The default is None.
+
+    Returns
+    -------
+    NDArrayInt
+        Selection array with shape ``(nx, ny, nz)``.
+
+    Notes
+    -----
+    As in :func:`get_polygon_selection_with_dilation_2d`, each polygon's
+    point-in-polygon containment mask and vertical index limits are
+    geometry-only and independent of the current selection state, so both
+    are computed once up front instead of being recomputed on every
+    ``(z-slice, polygon)`` pair of every dilation iteration.
     """
     if selection is None:
         _selection = np.zeros((grid.nx, grid.ny, grid.nz), dtype=np.int32)
@@ -1409,18 +1584,30 @@ def get_polygon_selection_with_dilation_3d(
             "vertical_limits must contain one [bottom, top] pair per polygon."
         )
 
-    # Grid coordinates -> Flat array (2d, horizontal slice)
-    _grid_coords_2d = grid.center_coords_2d.reshape(2, -1, order="F").T
+    # Grid coordinates -> Flat array (2d, horizontal slice), computed once.
+    _center_coords_2d = grid.center_coords_2d
+    _grid_coords_2d = _center_coords_2d.reshape(2, -1, order="F").T
+
+    sel_ids = np.arange(len(polygons)) + 1
+
+    # Precompute per-polygon vertical index limits and 2D containment masks
+    # once; both are invariant across z-slices and dilation iterations.
+    limits_per_polygon = [
+        _get_vertical_limits_indices(_vertical_limits[i, :], grid.z0, grid.dz, grid.nz)
+        for i in range(len(polygons))
+    ]
+    containment_masks = [
+        mpl.path.Path(vertices)
+        .contains_points(_grid_coords_2d)
+        .reshape(grid.nx, grid.ny, order="F")
+        for vertices in polygons
+    ]
 
     # Create an initial selection for each cell (only one voxel selected)
-    sel_ids = np.arange(len(polygons)) + 1
     for i, (sel_id, vertices) in enumerate(zip(sel_ids, polygons)):
-        # Get the vertical limits in indices
-        _limits = _get_vertical_limits_indices(
-            _vertical_limits[i, :], grid.z0, grid.dz, grid.nz
-        )
+        _limits = limits_per_polygon[i]
         # Initial selection
-        ix, iy = _get_centroid_voxel_coords(vertices, grid)
+        ix, iy = _get_centroid_voxel_coords(vertices, grid, _center_coords_2d)
         _selection[ix, iy, _limits[0] : _limits[1] + 1] = sel_id
 
     # initiate _oldselection variable
@@ -1434,15 +1621,18 @@ def get_polygon_selection_with_dilation_3d(
 
         for iz in range(grid.nz):
             # Perform the dilation for each selection
-            for i, (sel_id, vertices) in enumerate(zip(sel_ids, polygons)):
-                _limits = _get_vertical_limits_indices(
-                    _vertical_limits[i, :], grid.z0, grid.dz, grid.nz
-                )
+            for i, (sel_id, inside_polygon) in enumerate(
+                zip(sel_ids, containment_masks)
+            ):
+                _limits = limits_per_polygon[i]
                 if iz < _limits[0] or iz > _limits[1]:
                     continue
-                # The mask is free cells + the contained
-                mask = _get_mask(
-                    vertices, _selection[:, :, iz], _grid_coords_2d, grid.nx, grid.ny
+                # The mask is free cells + the contained. Free cells are
+                # re-derived from the current (possibly just-updated) slice
+                # so that sequential claims within the same sweep are
+                # respected, matching the original behaviour.
+                mask = np.logical_and(
+                    inside_polygon, _get_free_grid_cells(_selection[:, :, iz])
                 )
                 _selection[:, :, iz][
                     binary_dilation(
@@ -1484,10 +1674,10 @@ def get_owner_neigh_indices(
         Rectilinear grid defining the shape and flattened indexing convention.
     span_owner : Tuple[slice, slice, slice]
         Three-dimensional NumPy-style span selecting owner cells in an array of
-        shape ``(grid.nx, grid.ny, grid.nz)``.
+        shape ``(grid.nz, grid.ny, grid.nx)``.
     span_neigh : Tuple[slice, slice, slice]
         Three-dimensional NumPy-style span selecting neighbour cells in an array
-        of shape ``(grid.nx, grid.ny, grid.nz)``. This span must select the same
+        of shape ``(grid.nz, grid.ny, grid.nx)``. This span must select the same
         number of cells as ``span_owner`` so that owner and neighbour indices can
         be paired element-wise.
     owner_indices_to_keep : Optional[NDArrayInt], optional
@@ -1539,7 +1729,7 @@ def get_rlg_spatial_grad_mat(
     grid: RectilinearGrid,
     n: int,
     axis: int,
-    sub_selection: NDArrayInt,
+    sub_selection: Optional[NDArrayInt],
     which: Literal["forward", "backward", "both"] = "both",
 ) -> csc_array:
     """
@@ -1622,12 +1812,11 @@ def get_rlg_spatial_grad_mat(
     if which not in {"forward", "backward", "both"}:
         raise ValueError("which must be one of {'forward', 'backward', 'both'}.")
 
-    # Matrix for the spatial gradient along the selected axis.
-    mat = lil_array((grid.n_grid_cells, grid.n_grid_cells), dtype=np.float64)
+    shape = (grid.n_grid_cells, grid.n_grid_cells)
 
     # No neighbour exists if there is fewer than two cells along this axis.
     if n < 2:
-        return mat.tocsc()
+        return coo_array(shape, dtype=np.float64).tocsc()
 
     tmp = {
         0: grid.gamma_ij_x_m2,
@@ -1635,46 +1824,59 @@ def get_rlg_spatial_grad_mat(
         2: grid.gamma_ij_z_m2,
     }[axis] / grid.grid_cell_volume_m3
 
-    _slices1: List[slice] = [slice(0, n - 1), slice(None), slice(None)]
-    _slices2: List[slice] = [slice(1, n), slice(None), slice(None)]
-    slices1: Tuple[slice, slice, slice] = (
-        _slices1[0 - axis],
-        _slices1[1 - axis],
-        _slices1[2 - axis],
-    )
-    slices2: Tuple[slice, slice, slice] = (
-        _slices2[0 - axis],
-        _slices2[1 - axis],
-        _slices2[2 - axis],
-    )
+    # Spans are expressed against a (nx, ny, nz)-shaped array, so the array
+    # axis matches the spatial axis directly.
+    _slices1: List[slice] = [slice(None), slice(None), slice(None)]
+    _slices2: List[slice] = [slice(None), slice(None), slice(None)]
+    _slices1[axis] = slice(0, n - 1)
+    _slices2[axis] = slice(1, n)
+    slices1: Tuple[slice, slice, slice] = tuple(_slices1)  # ty:ignore[invalid-assignment]
+    slices2: Tuple[slice, slice, slice] = tuple(_slices2)  # ty:ignore[invalid-assignment]
+
+    # Accumulate (row, col, value) triplets and build the sparse matrix once
+    # via COO -> CSC. This avoids scipy's LIL fancy-indexing path
+    # (`__getitem__`/`__setitem__` on array-of-indices), which dominates
+    # runtime for large grids because each `mat[idx, idx] += ...` call reads
+    # back the current values before writing. COO->CSC conversion sums
+    # duplicate (row, col) entries automatically, which reproduces the same
+    # `+=`/`-=` accumulation semantics as the previous LIL-based code.
+    rows: List[NDArrayInt] = []
+    cols: List[NDArrayInt] = []
+    data: List[NDArrayFloat] = []
+
+    def _add_scheme(
+        span_owner: Tuple[slice, slice, slice], span_neigh: Tuple[slice, slice, slice]
+    ) -> None:
+        idc_owner, idc_neigh = get_owner_neigh_indices(
+            grid,
+            span_owner,
+            span_neigh,
+            owner_indices_to_keep=sub_selection,
+            neigh_indices_to_keep=sub_selection,
+        )
+        ones = np.ones(idc_owner.size)
+        rows.append(idc_owner)
+        cols.append(idc_neigh)
+        data.append(-tmp * ones)
+        rows.append(idc_owner)
+        cols.append(idc_owner)
+        data.append(tmp * ones)
 
     if which in ["forward", "both"]:
         # Forward scheme only: see PhD manuscript, chapter 7 for the explanaition.
-        idc_owner, idc_neigh = get_owner_neigh_indices(
-            grid,
-            slices1,
-            slices2,
-            owner_indices_to_keep=sub_selection,
-            neigh_indices_to_keep=sub_selection,
-        )
-
-        mat[idc_owner, idc_neigh] -= tmp * np.ones(idc_owner.size)
-        mat[idc_owner, idc_owner] += tmp * np.ones(idc_owner.size)
+        _add_scheme(slices1, slices2)
 
     if which in ["backward", "both"]:
         # Backward scheme: owner cells are connected to backward neighbours.
-        idc_owner, idc_neigh = get_owner_neigh_indices(
-            grid,
-            slices2,
-            slices1,
-            owner_indices_to_keep=sub_selection,
-            neigh_indices_to_keep=sub_selection,
-        )
+        _add_scheme(slices2, slices1)
 
-        mat[idc_owner, idc_neigh] -= tmp * np.ones(idc_owner.size)
-        mat[idc_owner, idc_owner] += tmp * np.ones(idc_owner.size)
+    if not rows:
+        return coo_array(shape, dtype=np.float64).tocsc()
 
-    return mat.tocsc()
+    row = np.concatenate(rows)
+    col = np.concatenate(cols)
+    val = np.concatenate(data)
+    return coo_array((val, (row, col)), shape=shape, dtype=np.float64).tocsc()
 
 
 def make_rlg_spatial_gradient_matrices(
@@ -1752,9 +1954,11 @@ def make_rlg_spatial_gradient_matrices(
     Boundary cells without a valid neighbour along a given direction do not
     receive a contribution for that direction.
     """
-    if sub_selection is None:
-        sub_selection: NDArrayInt = np.arange(grid.n_grid_cells)
-
+    # NOTE: sub_selection is intentionally left as None (rather than eagerly
+    # materialized as np.arange(grid.n_grid_cells)) when the caller doesn't
+    # restrict cells. get_owner_neigh_indices treats None as "keep
+    # everything" and skips the (otherwise no-op) np.isin filtering pass,
+    # which is a measurable cost on large grids.
     return (
         get_rlg_spatial_grad_mat(
             grid, grid.nx, axis=0, sub_selection=sub_selection, which=which
@@ -1772,7 +1976,7 @@ def get_rlg_perm_mat(
     grid: RectilinearGrid,
     n: int,
     axis: int,
-    sub_selection: NDArrayInt,
+    sub_selection: Optional[NDArrayInt],
 ) -> csc_array:
     """
     Build a sparse forward-neighbour permutation matrix along one grid axis.
@@ -1830,25 +2034,20 @@ def get_rlg_perm_mat(
     if axis not in {0, 1, 2}:
         raise ValueError("axis must be one of {0, 1, 2}.")
 
-    # Matrix for the spatial permutation along the selected axis.
-    mat = lil_array((grid.n_grid_cells, grid.n_grid_cells), dtype=np.float64)
+    shape = (grid.n_grid_cells, grid.n_grid_cells)
 
     # No forward neighbour exists if there is fewer than two cells along this axis.
     if n < 2:
-        return mat.tocsc()
+        return coo_array(shape, dtype=np.float64).tocsc()
 
-    _slices1: List[slice] = [slice(0, n - 1), slice(None), slice(None)]
-    _slices2: List[slice] = [slice(1, n), slice(None), slice(None)]
-    slices1: Tuple[slice, slice, slice] = (
-        _slices1[0 - axis],
-        _slices1[1 - axis],
-        _slices1[2 - axis],
-    )
-    slices2: Tuple[slice, slice, slice] = (
-        _slices2[0 - axis],
-        _slices2[1 - axis],
-        _slices2[2 - axis],
-    )
+    # Spans are expressed against a (nx, ny, nz)-shaped array, so the array
+    # axis matches the spatial axis directly.
+    _slices1: List[slice] = [slice(None), slice(None), slice(None)]
+    _slices2: List[slice] = [slice(None), slice(None), slice(None)]
+    _slices1[axis] = slice(0, n - 1)
+    _slices2[axis] = slice(1, n)
+    slices1: Tuple[slice, slice, slice] = tuple(_slices1)  # ty:ignore[invalid-assignment]
+    slices2: Tuple[slice, slice, slice] = tuple(_slices2)  # ty:ignore[invalid-assignment]
 
     # Forward-neighbour pairs along the selected axis.
     idc_owner, idc_neigh = get_owner_neigh_indices(
@@ -1859,8 +2058,11 @@ def get_rlg_perm_mat(
         neigh_indices_to_keep=sub_selection,
     )
 
-    mat[idc_neigh, idc_owner] = np.ones(idc_owner.size)
-    return mat.tocsc()
+    return coo_array(
+        (np.ones(idc_owner.size), (idc_neigh, idc_owner)),
+        shape=shape,
+        dtype=np.float64,
+    ).tocsc()
 
 
 def make_rlg_spatial_permutation_matrices(
@@ -1883,9 +2085,9 @@ def make_rlg_spatial_permutation_matrices(
     Tuple[csc_array, csc_array]
         Spatial permutation matrices for x and y axes.
     """
-    if sub_selection is None:
-        sub_selection: NDArrayInt = np.arange(grid.n_grid_cells)
-
+    # See the corresponding note in make_rlg_spatial_gradient_matrices: None
+    # is left as-is so get_owner_neigh_indices can skip the no-op isin
+    # filtering pass when no real sub-selection is requested.
     return (
         get_rlg_perm_mat(grid, grid.nx, 0, sub_selection),
         get_rlg_perm_mat(grid, grid.ny, 1, sub_selection),
