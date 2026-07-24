@@ -1034,6 +1034,22 @@ class RectilinearGrid(Grid):
             ),  # must convert to a list to avoid == issues with numpy
         )
 
+    @property
+    def contour(self) -> shapely.Polygon:
+        """Return the grid contour as a ``shapely.Polygon``."""
+        _dx = self.dx * self.nx / 2.0
+        _dy = self.dy * self.ny / 2.0
+        return shapely.affinity.rotate(  # ty:ignore[possibly-missing-submodule]
+            shapely.box(
+                xmin=self.cx - _dx,
+                xmax=self.cx + _dx,
+                ymin=self.cy - _dy,
+                ymax=self.cy + _dy,
+            ),
+            angle=self.theta,
+            origin=[self.cx, self.cy],
+        )
+
     def to_pyvista(
         self,
         cell_data: Optional[dict[str, Union[NDArrayFloat, NDArrayInt]]] = None,
