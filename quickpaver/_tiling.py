@@ -600,64 +600,79 @@ def extract_tiling_centers(
 def extract_tiling_vertices(
     polygons: Union[shapely.MultiPolygon, Iterable[shapely.Polygon]],
     n_decimals: int = 2,
-) -> Tuple[NDArrayFloat, Dict[int, List[int]], NDArrayInt]:
+) -> Tuple[NDArrayFloat, Dict[int, List[int]], NDArrayInt, Dict[int, List[int]]]:
     """
-    Extract the vertices of all polygons (without duplicates).
+    Extract the vertices of all polygons, deduplicating shared vertices.
+
+    Vertices shared between adjacent polygons (identical coordinates up to
+    ``n_decimals`` decimal places) are merged into a single entry.  The
+    closing repeat of each exterior ring is dropped before deduplication.
+    Both adjacency mappings are built in a single pass over the same
+    ``(cluster_indices, poly_indices)`` arrays so ``shapely.get_rings`` is
+    called only once.
 
     Parameters
     ----------
     polygons : Union[shapely.MultiPolygon, Iterable[shapely.Polygon]]
-        Polygons for which vertices are extracted.
+        Polygons whose vertices are to be extracted.
     n_decimals : int, optional
-        Number of decimals to use for the duplicate removal (it relies on hashing),
-        by default 2.
+        Number of decimal places used when rounding coordinates before
+        hashing for duplicate removal.  By default ``2``.
 
     Returns
     -------
-    Tuple[NDArrayFloat, Dict[int, List[int]], NDArrayInt]
-        - 2D Array of vertices coordinates with shape (n, 2), n being the number of
-          vertices extracted.
-        - Dict with vertice id ad key and list of associated polygon id as values.
-          This is because duplicated vertices are merged.
+    unique_coords : NDArrayFloat, shape (n_verts, 2)
+        Coordinates of the ``n_verts`` deduplicated vertices, in
+        lexicographic ``(x, y)`` order (as established by
+        :func:`numpy.unique`).
+    vert_to_polys : Dict[int, List[int]]
+        Deduplicated vertex id → list of polygon ids that share it.
+        Interior vertices shared by several polygons have lists with more
+        than one entry; boundary vertices have exactly one.
+    cluster_indices : NDArrayInt, shape (n_input_verts,)
+        For every input vertex (closing repeats removed, in input order),
+        its deduplicated vertex id.  Satisfies
+        ``unique_coords[cluster_indices] ≈ original_coords``.
+    poly_to_verts : Dict[int, List[int]]
+        Polygon id → deduplicated vertex ids in ring order.
     """
     if isinstance(polygons, shapely.MultiPolygon):
         geom_array = np.array(polygons.geoms)
     else:
         geom_array = np.asarray(list(polygons))
 
-    # Batch-extract all coordinates and their polygon indices via Shapely C-level API
+    rings = shapely.get_rings(geom_array)  # single call
+    n_per_ring = shapely.get_num_coordinates(rings)
     all_coords, poly_indices = shapely.get_coordinates(geom_array, return_index=True)
 
-    # Drop the repeated closing vertex of each polygon ring.
-    # Each exterior ring repeats its first vertex at the end.
-    rings = shapely.get_rings(geom_array)
-    n_per_ring = shapely.get_num_coordinates(rings)
+    # drop closing repeat (last vertex of every ring)
     drop = np.zeros(len(all_coords), dtype=bool)
-    cumsum = np.cumsum(n_per_ring)
-    drop[cumsum - 1] = True
-
+    drop[np.cumsum(n_per_ring) - 1] = True
     coords = np.round(all_coords[~drop], decimals=n_decimals)
     poly_indices = poly_indices[~drop]
 
-    # Deduplicate vertices via structured array for fast numpy hashing
+    # deduplicate via structured array
     dt = np.dtype([("x", coords.dtype), ("y", coords.dtype)])
     structured = np.empty(len(coords), dtype=dt)
     structured["x"] = coords[:, 0]  # ty:ignore[invalid-assignment]
     structured["y"] = coords[:, 1]  # ty:ignore[invalid-assignment]
     unique_structured, inverse = np.unique(structured, return_inverse=True)
-
-    # Build vert_to_polys mapping
-    vert_to_polys: Dict[int, List[int]] = defaultdict(list)
-    for vert_idx, poly_id in zip(inverse, poly_indices):
-        vert_to_polys[int(vert_idx)].append(int(poly_id))
-
-    unique_coords = np.column_stack([unique_structured["x"], unique_structured["y"]])  # ty:ignore[invalid-argument-type]
     cluster_indices = inverse.astype(np.int64)
+    unique_coords = np.column_stack([unique_structured["x"], unique_structured["y"]])  # ty:ignore[invalid-argument-type]
+
+    # build both adjacency dicts in one pass
+    vert_to_polys: Dict[int, List[int]] = defaultdict(list)
+    poly_to_verts: Dict[int, List[int]] = defaultdict(list)
+    for vert_idx, poly_id in zip(cluster_indices, poly_indices):
+        vi, pi = int(vert_idx), int(poly_id)
+        vert_to_polys[vi].append(pi)
+        poly_to_verts[pi].append(vi)
 
     return (
         unique_coords,
         dict(vert_to_polys),
         cluster_indices,
+        dict(poly_to_verts),
     )
 
 
@@ -678,7 +693,7 @@ def adjacency_by_shared_vertices(
         Dictionary mapping polygon index to a list of neighboring polygon indices
         (sharing at least one vertex).
     """
-    verts, vert_to_polys, _ = extract_tiling_vertices(polygons)
+    verts, vert_to_polys, _, _ = extract_tiling_vertices(polygons)
 
     # Build adjacency dict
     adj = defaultdict(set)

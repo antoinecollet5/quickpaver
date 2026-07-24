@@ -180,10 +180,10 @@ def test_gen_polygonal_tiling(
 
     # MultiPolygon input
     _ = extract_tiling_centers(tiles)
-    _, _, _ = extract_tiling_vertices(tiles)
+    _, _, _, _ = extract_tiling_vertices(tiles)
     # Iterable-of-polygons input
     _ = extract_tiling_centers(tiles.geoms)
-    _, _, _ = extract_tiling_vertices(tiles.geoms)
+    _, _, _, _ = extract_tiling_vertices(tiles.geoms)
 
 
 # ---------------------------------------------------------------------------

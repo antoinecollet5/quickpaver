@@ -348,7 +348,7 @@ def _(mo):
 @app.cell
 def _(france, grid_hexagons_france_rot, plot_helper, quickpaver):
     centers = quickpaver.extract_tiling_centers(grid_hexagons_france_rot.geoms)
-    vertices, v_c_adj, clusters_2 = quickpaver.extract_tiling_vertices(
+    vertices, v_c_adj, clusters_2, _ = quickpaver.extract_tiling_vertices(
         grid_hexagons_france_rot.geoms
     )
 
@@ -365,7 +365,7 @@ def _(france, grid_hexagons_france_rot, plot_helper, quickpaver):
 @app.cell
 def _(france_and_corsica, grid_triangles_rot_ani, plot_helper, quickpaver):
     centers2 = quickpaver.extract_tiling_centers(grid_triangles_rot_ani.geoms)
-    vertices2, v_c_adj2, clusters_3 = quickpaver.extract_tiling_vertices(
+    vertices2, v_c_adj2, clusters_3, _ = quickpaver.extract_tiling_vertices(
         grid_triangles_rot_ani.geoms
     )
 
