@@ -82,6 +82,7 @@ binary dilation, resampling, and conservative or duplicative array upsampling.
 
    Grid
    RectilinearGrid
+   TriMesh
    rlg_idx_to_nn
    rlg_nn_to_idx
    span_to_node_numbers_2d
@@ -107,6 +108,7 @@ from quickpaver.__about__ import __author__, __email__, __version__
 from quickpaver._grid import (
     Grid,
     RectilinearGrid,
+    TriMesh,
     binary_dilation,
     conservative_upsample,
     create_selections_array_2d,
@@ -159,6 +161,7 @@ __all__ = [
     "gen_polygonal_tiling",
     "Grid",
     "RectilinearGrid",
+    "TriMesh",
     "create_selections_array_2d",
     "rlg_idx_to_nn",
     "rlg_nn_to_idx",

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 import math
+from dataclasses import dataclass, replace
 from typing import List, Literal, Optional, Sequence, Tuple, Union
 
 import matplotlib as mpl
@@ -1036,7 +1037,7 @@ class RectilinearGrid(Grid):
 
     @property
     def contour(self) -> shapely.Polygon:
-        """Return the grid contour as a ``shapely.Polygon``."""
+        """Return the grid exterior contour as a ``shapely.Polygon``."""
         _dx = self.dx * self.nx / 2.0
         _dy = self.dy * self.ny / 2.0
         return shapely.affinity.rotate(  # ty:ignore[possibly-missing-submodule]
@@ -2277,3 +2278,84 @@ def conservative_upsample(array: NDArrayFloat, factor: int) -> NDArrayFloat:
         raise ValueError("factor must be a positive integer.")
 
     return duplicative_upsample(array, factor) / float(factor**2)
+
+
+@dataclass(frozen=True, slots=True)
+class TriMesh:
+    """
+    Flat representation of a triangular mesh.
+
+    All arrays are indexed by a contiguous triangle id ``t`` in
+    ``range(n_tri)`` and a contiguous vertex id ``v`` in ``range(n_verts)``.
+
+    Attributes
+    ----------
+    verts_xy : ndarray, shape (n_verts, 2)
+        Coordinates of every vertex.
+    tri_verts : ndarray[int], shape (n_tri, 3)
+        Corner vertex ids per triangle.
+    edge_lengths_m : ndarray, shape (n_tri, 3)
+        Horizontal edge lengths ``[|v0 v1|, |v1 v2|, |v2 v0|]``.
+    tri_area_m2 : ndarray, shape (n_tri,)
+        The horizontal (projected) triangle area.
+    """
+
+    verts_xy: NDArrayFloat
+    tri_verts: NDArrayInt
+    edge_lengths_m: NDArrayFloat
+    tri_area_m2: NDArrayFloat
+
+    @property
+    def n_verts(self) -> int:
+        """The total number of vertices."""
+        return self.verts_xy.shape[0]
+
+    @property
+    def n_tri(self) -> int:
+        """The number of triangles."""
+        return self.tri_verts.shape[0]
+
+    @property
+    def area_m2(self) -> float:
+        """The total covered area in m2."""
+        return self.tri_area_m2.sum()
+
+    def to_shapely(self) -> shapely.MultiPolygon:
+        """
+        Return the triangle mesh as a :class:`shapely.MultiPolygon`.
+
+        Triangle order matches ``tri_verts`` row order, so the polygon at
+        index ``t`` corresponds to triangle id ``t``.
+        """
+        return shapely.MultiPolygon(
+            [
+                shapely.Polygon(self.verts_xy[self.tri_verts[t]])
+                for t in range(self.n_tri)
+            ]
+        )
+
+    def transform(
+        self,
+        rot_deg: float = 0.0,
+        x: float = 0.0,
+        y: float = 0.0,
+        origin: tuple[float, float] | None = None,
+    ) -> TriMesh:
+        """
+        Return a new mesh rotated by ``rot_deg`` degrees (CCW) about ``origin``
+        (defaults to the mesh centroid) and then translated by ``(x, y)``.
+
+        """
+        theta = np.radians(rot_deg)
+        c, s = np.cos(theta), np.sin(theta)
+        rot = np.array([[c, -s], [s, c]], dtype=self.verts_xy.dtype)
+        if origin is None:
+            pivot = self.verts_xy.mean(axis=0)
+        else:
+            pivot = np.array(origin, dtype=self.verts_xy.dtype)
+        new_xy = (
+            (self.verts_xy - pivot) @ rot.T
+            + pivot
+            + np.array([x, y], dtype=self.verts_xy.dtype)
+        )
+        return replace(self, verts_xy=new_xy)
