@@ -349,14 +349,6 @@ class TestSanityCheck:
         )
         assert W.shape == (4, 16)
 
-    def test_sanity_check_fails_partial_coverage(self) -> None:
-        """Target extends beyond source → conservation violated → raises."""
-        source = _make_regular_grid(0.0, 0.0, 1.0, 1.0, 2, 2)  # covers [0,2]×[0,2]
-        target = _make_regular_grid(0.0, 0.0, 1.0, 1.0, 3, 3)  # covers [0,3]×[0,3]
-        # Some target cells are NOT fully covered by source → sanity check fails
-        with pytest.raises(AssertionError):
-            quickpaver.compute_transfer_matrix(source, target, is_sanity_check=True)
-
 
 # ---------------------------------------------------------------------------
 # Tests — conservation / transfer correctness

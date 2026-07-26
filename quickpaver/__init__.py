@@ -55,7 +55,7 @@ geometries.
    :toctree: _autosummary
 
    compute_transfer_matrix
-   compute_transfer_matrix_rectilinear
+   compute_transfer_matrix_with_intersections
 
 Test data
 ^^^^^^^^^
@@ -139,7 +139,7 @@ from quickpaver._tiling import (
 )
 from quickpaver._transfer_matrix import (
     compute_transfer_matrix,
-    compute_transfer_matrix_rectilinear,
+    compute_transfer_matrix_with_intersections,
 )
 from quickpaver.data import (
     load_corsica_contour,
@@ -181,7 +181,7 @@ __all__ = [
     "extract_tiling_centers",
     "extract_tiling_vertices",
     "compute_transfer_matrix",
-    "compute_transfer_matrix_rectilinear",
+    "compute_transfer_matrix_with_intersections",
     "get_array_borders_selection",
     "intersects_mask",
     "adjacency_by_shared_vertices",
