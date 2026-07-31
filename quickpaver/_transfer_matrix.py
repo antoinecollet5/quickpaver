@@ -26,16 +26,17 @@ entries to the matrix (their row/column is entirely zero), while the
 matrix shape itself is left unchanged so masking is transparent to
 callers.
 
-Internally, the entry points dispatch to one of three implementations
-based on two booleans -- ``is_source_grid_rectilinear`` and
-``is_target_grid_rectilinear`` -- describing which of the two grids is
-a regular (possibly rotated) rectilinear grid:
+Each side of the transfer may be a :class:`~quickpaver._grid.RectilinearGrid`,
+a :class:`~quickpaver._grid.TriMesh`, or an arbitrary
+:class:`shapely.MultiPolygon`. Internally, the entry points dispatch to
+one of several implementations based on which *kind* each side is:
 
-- **Both arbitrary** (``False, False``): handled by an STRtree-based
-  implementation using vectorized Shapely intersection operations.
-- **Both rectilinear** (``True, True``): specializes to two rotated
-  rectilinear (regular) grids and avoids Shapely entirely, offering
-  two fast paths:
+- **Both arbitrary polygons** (``MultiPolygon, MultiPolygon``):
+  handled by an STRtree-based implementation using vectorized Shapely
+  intersection operations.
+- **Both rectilinear** (``RectilinearGrid, RectilinearGrid``):
+  specializes to two rotated rectilinear (regular) grids and avoids
+  Shapely entirely, offering two fast paths:
 
   1. **Separable** (relative angle = k x 90 degrees): the 2-D overlap
      factorises into two independent 1-D interval-overlap problems.
@@ -43,14 +44,57 @@ a regular (possibly rotated) rectilinear grid:
      enumeration followed by a numba-parallel Sutherland-Hodgman clip
      and shoelace area computation per pair. Falls back to a
      vectorised numpy pipeline when numba is not installed.
-- **Exactly one side rectilinear** (``True, False`` or ``False, True``):
-  exploits the regularity of the rectilinear side to replace the
-  generic STRtree candidate search with O(1) analytic index-range
-  arithmetic per polygon on the arbitrary side, while still using
-  Shapely for the exact clip (so arbitrary/non-convex/holed target or
-  source polygons remain fully supported). This removes the
-  tree-build/query cost that dominates the fully-arbitrary
-  implementation when one side is regular.
+- **Exactly one side rectilinear, other side arbitrary polygons**
+  (``RectilinearGrid, MultiPolygon``): exploits the regularity of the
+  rectilinear side to replace the generic STRtree candidate search
+  with O(1) analytic index-range arithmetic per polygon on the
+  arbitrary side. Convex polygons bypass Shapely entirely via a
+  numba/numpy Sutherland-Hodgman clip against the axis-aligned grid
+  cell; non-convex/holed polygons fall back to Shapely's exact clip.
+- **Rectilinear vs TriMesh** (either order): a *dedicated* path that
+  never materializes Shapely polygons for the mesh side at all (no
+  ``TriMesh.to_shapely()`` call). Triangle vertices are read directly
+  from ``mesh.verts_xy[mesh.tri_verts]`` (a pure numpy gather),
+  bounding boxes are computed with vectorized ``min``/``max`` reductions
+  over the fixed ``(n_tri, 3)`` vertex array (no ``shapely.bounds``),
+  and since every triangle has exactly 3 vertices, the padded clip
+  buffers required by the generic N-vertex clip are built without any
+  ragged-array bookkeeping (no ``get_coordinates``/``searchsorted``
+  dance -- the vertex count is a compile-time constant). Every
+  candidate is convex by construction, so the per-polygon convexity
+  test is skipped entirely, and the fast numba/numpy Sutherland-Hodgman
+  clip against the axis-aligned rectilinear cell is used for every
+  candidate pair; there is no Shapely fallback branch on this path
+  because a triangle can never be non-convex or holed.
+- **Both TriMesh** (``TriMesh, TriMesh``): every triangle is convex and
+  has exactly 3 vertices, so an STRtree is used only for candidate-pair
+  search (no analytic index is available for an irregular mesh), and
+  the exact overlap area is computed with a dedicated numba/numpy
+  triangle-triangle Sutherland-Hodgman clip -- no GEOS intersection
+  call in the hot loop.
+- **One side TriMesh, the other an arbitrary polygon grid**
+  (``TriMesh, MultiPolygon``): candidate pairs are still found via
+  STRtree (no analytic index available on either side), but since the
+  TriMesh side is always convex, the convexity test is skipped for it
+  and only the arbitrary-polygon side is checked. Convex candidates on
+  that side bypass Shapely via a generic convex-vs-convex
+  Sutherland-Hodgman clip (subject = arbitrary polygon, clip window =
+  triangle); non-convex/holed candidates fall back to Shapely. Note
+  this path still needs ``TriMesh.to_shapely()`` for the STRtree, since
+  there is no analytic index available on either side here (unlike the
+  rectilinear/TriMesh case above).
+
+Every code path returns its per-pair ``intersections`` output as a
+plain ``numpy`` object array (see :data:`IntersectionsArray`) rather
+than a ``shapely.MultiPolygon``: an object array can represent every
+case a clip can legitimately produce (a single ``Polygon``, a ``None``
+placeholder for a fast analytic path that never materializes exact
+geometry, or even a ``MultiPolygon`` when an exact Shapely clip against
+a concave polygon splits into disjoint pieces), whereas
+``shapely.MultiPolygon(...)`` cannot hold ``None`` entries or nested
+multi-part geometries. This keeps the return type uniform across every
+dispatch branch instead of varying between ``MultiPolygon`` and
+``ndarray`` depending on what happened to come out of the clip.
 """
 
 from __future__ import annotations
@@ -62,7 +106,7 @@ import shapely
 from scipy.sparse import coo_array, csc_array
 from shapely.strtree import STRtree
 
-from quickpaver._grid import RectilinearGrid
+from quickpaver._grid import RectilinearGrid, TriMesh
 from quickpaver._types import ArrayLike, NDArrayBool, NDArrayInt
 
 _HAS_NUMBA = False
@@ -85,39 +129,98 @@ except ModuleNotFoundError:
     prange = range  # ty:ignore[invalid-assignment]
 
 
+#: Any of the three grid representations accepted on either side of a
+#: transfer. ``RectilinearGrid`` and ``TriMesh`` are handled by
+#: specialized, Shapely-light code paths; plain ``shapely.MultiPolygon``
+#: is the fully generic fallback.
+GridLike = Union[RectilinearGrid, TriMesh, shapely.MultiPolygon]
+
+#: Return type used for the per-nonzero-entry ``intersections`` output
+#: of every function in this module: a 1-D numpy object array, one
+#: entry per matrix nonzero, holding either a ``shapely.Polygon``, a
+#: ``shapely.MultiPolygon`` (possible on the exact Shapely-clip
+#: fallback branches when a concave polygon's intersection splits into
+#: disjoint pieces), or ``None`` (a placeholder used by the purely
+#: analytic/Shapely-free paths, which never materialize exact
+#: geometry). See :func:`_pack_intersections`.
+IntersectionsArray = np.ndarray
+
+#: Hard cap on Sutherland-Hodgman clip buffer width, and the size of
+#: the per-call scratch arrays inside the numba clip kernels (where it
+#: must be a compile-time constant). Actual batch buffers are sized to
+#: fit the polygons at hand via :func:`_clip_buffer_width` rather than
+#: always allocating this width.
+_MAX_CLIP_VERTS = 32
+
+
+def _clip_buffer_width(max_verts: int, n_clip_edges: int) -> int:
+    """
+    Width required for the padded Sutherland-Hodgman vertex buffers.
+
+    Clipping a convex subject polygon against a convex window adds at
+    most one vertex per clip edge, so a buffer of ``max_verts +
+    n_clip_edges`` columns holds every possible clip result (4 edges
+    for an axis-aligned rectangle, 3 for a triangle window).
+
+    Sizing buffers this way rather than always allocating
+    ``_MAX_CLIP_VERTS`` columns matters because these are ``(n_candidate
+    _pairs, width)`` arrays: for the common case of 4-vertex cells the
+    width drops from 32 to 8, cutting that allocation and the
+    associated memory traffic four-fold.
+
+    Raises
+    ------
+    ValueError
+        If the required width exceeds :data:`_MAX_CLIP_VERTS`, which is
+        also the size of the numba kernels' internal scratch arrays.
+    """
+    width = max_verts + n_clip_edges
+    if width > _MAX_CLIP_VERTS:
+        raise ValueError(
+            f"Polygon with {max_verts} vertices needs a clip buffer of "
+            f"{width} columns (max_verts + {n_clip_edges} slots for "
+            "Sutherland-Hodgman output growth), exceeding "
+            f"_MAX_CLIP_VERTS={_MAX_CLIP_VERTS}. Increase "
+            "_MAX_CLIP_VERTS or exclude this polygon from the convex "
+            "fast path."
+        )
+    return width
+
+
 # ===================================================================
 # Public API
 # ===================================================================
 
 
 def compute_transfer_matrix_with_intersections(
-    source_grid: Union[RectilinearGrid, shapely.MultiPolygon],
-    target_grid: Union[RectilinearGrid, shapely.MultiPolygon],
+    source_grid: GridLike,
+    target_grid: GridLike,
     source_grid_mask: Optional[NDArrayBool] = None,
     target_grid_mask: Optional[NDArrayBool] = None,
     is_sanity_check: bool = False,
-) -> Tuple[csc_array, NDArrayInt, NDArrayInt, shapely.MultiPolygon]:
+) -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
     """
     Build a conservative transfer matrix between two polygonal grids,
     along with the per-pair intersection data.
 
     Dispatches to the fastest available implementation based on which
-    of the two grids are regular (rectilinear) grids.
+    kind each of the two grids is (see the module docstring for the
+    full decision table).
 
     Parameters
     ----------
-    source_grid : RectilinearGrid or shapely.MultiPolygon
-        Source grid. Either a ``RectilinearGrid`` (exposing ``cx, cy,
-        dx, dy, nx, ny, theta``) or a ``shapely.MultiPolygon``.
-    target_grid : RectilinearGrid or shapely.MultiPolygon
+    source_grid : RectilinearGrid, TriMesh or shapely.MultiPolygon
+        Source grid.
+    target_grid : RectilinearGrid, TriMesh or shapely.MultiPolygon
         Target grid, with the same convention as ``source_grid``.
     source_grid_mask : 1-D array of bool, optional
         Boolean mask over the source grid cells (length must equal the
         number of source cells: ``nx * ny`` for a ``RectilinearGrid``,
-        ``len(source_grid.geoms)`` for a ``MultiPolygon``). Cells where
-        the mask is ``False`` are excluded from the computation: they
-        contribute no nonzero row in the returned matrix. If ``None``,
-        all source cells are considered.
+        ``n_tri`` for a ``TriMesh``, ``len(source_grid.geoms)`` for a
+        ``MultiPolygon``). Cells where the mask is ``False`` are
+        excluded from the computation: they contribute no nonzero row
+        in the returned matrix. If ``None``, all source cells are
+        considered.
     target_grid_mask : 1-D array of bool, optional
         Boolean mask over the target grid cells, with the same
         convention as ``source_grid_mask`` but excluding columns
@@ -138,58 +241,185 @@ def compute_transfer_matrix_with_intersections(
         Source polygon id of each nonzero entry (row index in ``W``).
     target_indices : NDArrayInt, shape (nnz,)
         Target polygon id of each nonzero entry (column index in ``W``).
-    intersections : shapely.MultiPolygon
+    intersections : IntersectionsArray, shape (nnz,)
         Intersection geometries, parallel to ``source_indices`` /
-        ``target_indices``. Entries produced by the fast convex-clip
-        path (used internally when exactly one grid is rectilinear)
-        are returned as ``None`` placeholders, since that path computes
-        areas without materializing exact intersection geometry.
+        ``target_indices``. Entries produced by a fast analytic-area
+        path (used internally whenever at least one side is a
+        ``RectilinearGrid`` or a ``TriMesh``) are returned as ``None``
+        placeholders, since those paths compute areas without
+        materializing exact intersection geometry.
     """
-    is_source_grid_rectilinear = isinstance(source_grid, RectilinearGrid)
-    is_target_grid_rectilinear = isinstance(target_grid, RectilinearGrid)
+    return _dispatch_transfer(
+        source_grid,
+        target_grid,
+        source_grid_mask=source_grid_mask,
+        target_grid_mask=target_grid_mask,
+        is_sanity_check=is_sanity_check,
+        with_intersections=True,
+    )
 
-    if not is_source_grid_rectilinear and not is_target_grid_rectilinear:
-        return _compute_transfer_matrix(
+
+def _dispatch_transfer(
+    source_grid: GridLike,
+    target_grid: GridLike,
+    source_grid_mask: Optional[NDArrayBool] = None,
+    target_grid_mask: Optional[NDArrayBool] = None,
+    is_sanity_check: bool = False,
+    with_intersections: bool = True,
+) -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
+    """
+    Shared dispatch body for both public entry points.
+
+    ``with_intersections`` controls whether per-pair intersection
+    *geometry* is materialized. When ``False`` (used by
+    :func:`compute_transfer_matrix`, which discards it anyway), every
+    path skips its :func:`_polygons_from_padded_verts` /
+    ``shapely.intersection`` geometry-construction step and returns an
+    empty ``intersections`` array. The clip kernels still compute
+    intersection *areas* -- those are what the matrix coefficients are
+    made of -- so the saving is the GEOS ``Polygon`` object
+    construction, which dominates the cost of the geometry output.
+    """
+    is_source_rect = isinstance(source_grid, RectilinearGrid)
+    is_target_rect = isinstance(target_grid, RectilinearGrid)
+    is_source_tri = isinstance(source_grid, TriMesh)
+    is_target_tri = isinstance(target_grid, TriMesh)
+
+    # ---- TriMesh vs TriMesh: dedicated triangle-triangle clip.
+    #      Analytic (Shapely-free) area-only path -- always returns an
+    #      empty `intersections`, so `_check_intersections_alignment`
+    #      does not apply here (see its docstring). ----
+    if is_source_tri and is_target_tri:
+        return _compute_transfer_matrix_trimesh(
             source_grid,
             target_grid,
             source_grid_mask=source_grid_mask,
             target_grid_mask=target_grid_mask,
             is_sanity_check=is_sanity_check,
+            with_intersections=with_intersections,
         )
 
-    if is_source_grid_rectilinear and is_target_grid_rectilinear:
+    # ---- TriMesh vs RectilinearGrid: dedicated Shapely-free path.
+    #      Neither `to_shapely()` nor any Shapely geometry object is
+    #      built for the mesh side -- triangle vertices are consumed
+    #      directly as numpy arrays. Analytic area-only path -- always
+    #      returns an empty `intersections`, so
+    #      `_check_intersections_alignment` does not apply here (see
+    #      its docstring). ----
+    if is_source_tri and is_target_rect:
+        return _compute_transfer_matrix_rect_trimesh(
+            target_grid,
+            source_grid,
+            rectilinear_is_source=False,
+            rectilinear_grid_mask=target_grid_mask,
+            trimesh_mask=source_grid_mask,
+            is_sanity_check=is_sanity_check,
+            with_intersections=with_intersections,
+        )
+
+    if is_target_tri and is_source_rect:
+        return _compute_transfer_matrix_rect_trimesh(
+            source_grid,
+            target_grid,
+            rectilinear_is_source=True,
+            rectilinear_grid_mask=source_grid_mask,
+            trimesh_mask=target_grid_mask,
+            is_sanity_check=is_sanity_check,
+            with_intersections=with_intersections,
+        )
+
+    # ---- TriMesh vs arbitrary MultiPolygon: STRtree candidates (no
+    #      analytic index available on either side), triangle side
+    #      known-convex so only the polygon side needs a convexity
+    #      test. ----
+    if is_source_tri and not is_target_rect:
+        result = _compute_transfer_matrix_trimesh_polygon(
+            source_grid,
+            target_grid,  # ty:ignore[invalid-argument-type]
+            trimesh_is_source=True,
+            trimesh_mask=source_grid_mask,
+            polygon_mask=target_grid_mask,
+            is_sanity_check=is_sanity_check,
+            with_intersections=with_intersections,
+        )
+        if with_intersections:
+            _check_intersections_alignment(result[0], result[3])
+        return result
+
+    if is_target_tri and not is_source_rect:
+        result = _compute_transfer_matrix_trimesh_polygon(
+            target_grid,
+            source_grid,  # ty:ignore[invalid-argument-type]
+            trimesh_is_source=False,
+            trimesh_mask=target_grid_mask,
+            polygon_mask=source_grid_mask,
+            is_sanity_check=is_sanity_check,
+            with_intersections=with_intersections,
+        )
+        if with_intersections:
+            _check_intersections_alignment(result[0], result[3])
+        return result
+
+    # ---- Neither side is a TriMesh: original RectilinearGrid /
+    #      MultiPolygon dispatch. ----
+    if not is_source_rect and not is_target_rect:
+        result = _compute_transfer_matrix(
+            source_grid,  # ty:ignore[invalid-argument-type]
+            target_grid,  # ty:ignore[invalid-argument-type]
+            source_grid_mask=source_grid_mask,
+            target_grid_mask=target_grid_mask,
+            is_sanity_check=is_sanity_check,
+            with_intersections=with_intersections,
+        )
+        if with_intersections:
+            _check_intersections_alignment(result[0], result[3])
+        return result
+
+    # Analytic (Shapely-free) area-only path -- always returns an
+    # empty `intersections`, so `_check_intersections_alignment` does
+    # not apply here (see its docstring).
+    if is_source_rect and is_target_rect:
         return _compute_transfer_matrix_rectilinear(
             source_grid,
             target_grid,
             source_grid_mask=source_grid_mask,
             target_grid_mask=target_grid_mask,
             is_sanity_check=is_sanity_check,
+            with_intersections=with_intersections,
         )
 
-    if is_source_grid_rectilinear and not is_target_grid_rectilinear:
-        return _compute_transfer_matrix_mixed(
+    if is_source_rect and not is_target_rect:
+        result = _compute_transfer_matrix_mixed(
             source_grid,
-            target_grid,
+            target_grid,  # ty:ignore[invalid-argument-type]
             rectilinear_is_source=True,
             rectilinear_grid_mask=source_grid_mask,
             polygon_grid_mask=target_grid_mask,
             is_sanity_check=is_sanity_check,
+            with_intersections=with_intersections,
         )
+        if with_intersections:
+            _check_intersections_alignment(result[0], result[3])
+        return result
 
-    # not is_source_grid_rectilinear and is_target_grid_rectilinear
-    return _compute_transfer_matrix_mixed(
-        target_grid,
+    # not is_source_rect and is_target_rect
+    result = _compute_transfer_matrix_mixed(
+        target_grid,  # ty:ignore[invalid-argument-type]
         source_grid,  # ty:ignore[invalid-argument-type]
         rectilinear_is_source=False,
         rectilinear_grid_mask=target_grid_mask,
         polygon_grid_mask=source_grid_mask,
         is_sanity_check=is_sanity_check,
+        with_intersections=with_intersections,
     )
+    if with_intersections:
+        _check_intersections_alignment(result[0], result[3])
+    return result
 
 
 def compute_transfer_matrix(
-    source_grid: Union[RectilinearGrid, shapely.MultiPolygon],
-    target_grid: Union[RectilinearGrid, shapely.MultiPolygon],
+    source_grid: GridLike,
+    target_grid: GridLike,
     source_grid_mask: Optional[NDArrayBool] = None,
     target_grid_mask: Optional[NDArrayBool] = None,
     is_sanity_check: bool = False,
@@ -198,29 +428,24 @@ def compute_transfer_matrix(
     Build a conservative transfer matrix between two polygonal grids.
 
     Dispatches to the fastest available implementation based on which
-    of the two grids are regular (rectilinear) grids. This is a thin
-    wrapper around :func:`compute_transfer_matrix_with_intersections`
-    that discards the per-pair index/intersection data and returns
-    only the sparse matrix.
+    kind each of the two grids is (see the module docstring). This is
+    a thin wrapper around
+    :func:`compute_transfer_matrix_with_intersections` that discards
+    the per-pair index/intersection data and returns only the sparse
+    matrix.
 
     Parameters
     ----------
-    source_grid : RectilinearGrid or shapely.MultiPolygon
-        Source grid. Either a ``RectilinearGrid`` (exposing ``cx, cy,
-        dx, dy, nx, ny, theta``) or a ``shapely.MultiPolygon``.
-    target_grid : RectilinearGrid or shapely.MultiPolygon
+    source_grid : RectilinearGrid, TriMesh or shapely.MultiPolygon
+        Source grid.
+    target_grid : RectilinearGrid, TriMesh or shapely.MultiPolygon
         Target grid, with the same convention as ``source_grid``.
     source_grid_mask : 1-D array of bool, optional
-        Boolean mask over the source grid cells (length must equal the
-        number of source cells: ``nx * ny`` for a ``RectilinearGrid``,
-        ``len(source_grid.geoms)`` for a ``MultiPolygon``). Cells where
-        the mask is ``False`` are excluded from the computation: they
-        contribute no nonzero row in the returned matrix. If ``None``,
-        all source cells are considered.
+        Boolean mask over the source grid cells. See
+        :func:`compute_transfer_matrix_with_intersections`.
     target_grid_mask : 1-D array of bool, optional
-        Boolean mask over the target grid cells, with the same
-        convention as ``source_grid_mask`` but excluding columns
-        instead of rows. If ``None``, all target cells are considered.
+        Boolean mask over the target grid cells. See
+        :func:`compute_transfer_matrix_with_intersections`.
     is_sanity_check : bool, optional
         If True, verify that every fully-covered (and unmasked) source
         cell conserves its quantity exactly (up to 1e-10).
@@ -232,13 +457,21 @@ def compute_transfer_matrix(
         ``(n_source, n_target)`` such that ``v_target = W.T @ v_source``.
         The shape always reflects the full (unmasked) grid sizes;
         masked-out cells simply have no nonzero entries.
+
+    Notes
+    -----
+    Because the per-pair intersection geometry is discarded anyway,
+    this skips building it in the first place (see
+    :func:`_dispatch_transfer`), avoiding one ``shapely.Polygon``
+    construction per nonzero matrix entry.
     """
-    return compute_transfer_matrix_with_intersections(
+    return _dispatch_transfer(
         source_grid,
         target_grid,
         source_grid_mask=source_grid_mask,
         target_grid_mask=target_grid_mask,
         is_sanity_check=is_sanity_check,
+        with_intersections=False,
     )[0]
 
 
@@ -268,7 +501,8 @@ def _compute_transfer_matrix(
     source_grid_mask: Optional[NDArrayBool] = None,
     target_grid_mask: Optional[NDArrayBool] = None,
     is_sanity_check: bool = False,
-) -> Tuple[csc_array, NDArrayInt, NDArrayInt, shapely.MultiPolygon]:
+    with_intersections: bool = True,
+) -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
     """
     Build a conservative transfer matrix between two arbitrary
     polygonal grids.
@@ -336,7 +570,7 @@ def _compute_transfer_matrix(
         Source polygon id of each nonzero entry.
     target_indices : NDArrayInt, shape (nnz,)
         Target polygon id of each nonzero entry.
-    intersections : shapely.MultiPolygon
+    intersections : IntersectionsArray, shape (nnz,)
         Intersection geometries for each nonzero entry.
 
     Notes
@@ -491,7 +725,9 @@ def _compute_transfer_matrix(
         transfer_matrix,
         source_indices,
         target_indices,
-        shapely.MultiPolygon(list(intersections)),
+        _pack_intersections(intersections)
+        if with_intersections
+        else _no_intersections(),
     )
 
 
@@ -506,7 +742,8 @@ def _compute_transfer_matrix_rectilinear(
     source_grid_mask: Optional[NDArrayBool] = None,
     target_grid_mask: Optional[NDArrayBool] = None,
     is_sanity_check: bool = False,
-) -> Tuple[csc_array, NDArrayInt, NDArrayInt, shapely.MultiPolygon]:
+    with_intersections: bool = True,
+) -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
     """
     Build a conservative transfer matrix between two rotated
     rectilinear grids.
@@ -543,10 +780,13 @@ def _compute_transfer_matrix_rectilinear(
         Source cell linear index of each nonzero entry.
     target_indices : NDArrayInt, shape (nnz,)
         Target cell linear index of each nonzero entry.
-    intersections : shapely.MultiPolygon
-        Empty. Exact intersection geometry is not computed by this
-        analytic (Shapely-free) implementation; only areas are used to
-        build the matrix.
+    intersections : IntersectionsArray, shape (nnz,)
+        One intersection ``Polygon`` per nonzero matrix entry, built
+        from the same clipped vertices already produced by the
+        separable/non-separable analytic kernels via
+        :func:`_polygons_from_padded_verts` -- no GEOS clipping call,
+        only vectorized ``shapely.polygons`` construction from
+        already-known vertex coordinates.
 
     Notes
     -----
@@ -554,7 +794,7 @@ def _compute_transfer_matrix_rectilinear(
     (within 1e-9 rad) the overlap factorises into two 1-D problems.
     Otherwise a numba-parallel Sutherland-Hodgman clipper computes
     intersection areas (with a numpy-only fallback). No Shapely
-    dependency in either case.
+    dependency for the area computation itself in either case.
     """
     n_source = source_grid.nx * source_grid.ny
     n_target = target_grid.nx * target_grid.ny
@@ -562,51 +802,61 @@ def _compute_transfer_matrix_rectilinear(
     source_grid_mask = _validate_mask(source_grid_mask, n_source, "source_grid_mask")
     target_grid_mask = _validate_mask(target_grid_mask, n_target, "target_grid_mask")
 
-    mat = _compute_transfer_matrix_rectilinear_impl(
-        (source_grid.cx, source_grid.cy),
-        source_grid.dx,
-        source_grid.dy,
-        source_grid.nx,
-        source_grid.ny,
-        source_grid.theta,
-        (target_grid.cx, target_grid.cy),
-        target_grid.dx,
-        target_grid.dy,
-        target_grid.nx,
-        target_grid.ny,
-        target_grid.theta,
-        is_sanity_check=False,  # sanity check applied after masking below
+    src_lin, tgt_lin, weights, intersections = (
+        _compute_transfer_matrix_rectilinear_impl(
+            (source_grid.cx, source_grid.cy),
+            source_grid.dx,
+            source_grid.dy,
+            source_grid.nx,
+            source_grid.ny,
+            source_grid.theta,
+            (target_grid.cx, target_grid.cy),
+            target_grid.dx,
+            target_grid.dy,
+            target_grid.nx,
+            target_grid.ny,
+            target_grid.theta,
+            with_intersections=with_intersections,
+        )
     )
 
-    mat = _apply_masks_to_matrix(mat, source_grid_mask, target_grid_mask)
+    # -- apply masks directly on the raw (src_lin, tgt_lin, ...) arrays
+    #    -- these are the single source of truth for both the matrix
+    #    and `intersections`, so masking them in lockstep here (rather
+    #    than reconstructing a mask via `mat.tocoo()` afterward) keeps
+    #    `intersections` guaranteed aligned with the final nonzero
+    #    entries regardless of how `scipy.sparse` orders them
+    #    internally. --
+    if source_grid_mask is not None or target_grid_mask is not None:
+        keep = np.ones(len(src_lin), dtype=bool)
+        if source_grid_mask is not None:
+            keep &= source_grid_mask[src_lin]
+        if target_grid_mask is not None:
+            keep &= target_grid_mask[tgt_lin]
+        src_lin = src_lin[keep]
+        tgt_lin = tgt_lin[keep]
+        weights = weights[keep]
+        # `intersections` is deliberately empty when geometry was not
+        # requested, in which case there is nothing to keep in lockstep.
+        if with_intersections:
+            intersections = intersections[keep]
+
+    mat = coo_array(
+        (weights, (src_lin, tgt_lin)),
+        shape=(n_source, n_target),
+    ).tocsc()
 
     if is_sanity_check:
         _check_conservation(mat)
 
-    _coo = mat.tocoo()
-    return mat, _coo.row, _coo.col, shapely.MultiPolygon([])
-
-
-def _apply_masks_to_matrix(
-    mat: csc_array,
-    source_grid_mask: Optional[NDArrayBool],
-    target_grid_mask: Optional[NDArrayBool],
-) -> csc_array:
-    """Zero out rows/columns corresponding to masked-out cells, keeping shape."""
-    if source_grid_mask is None and target_grid_mask is None:
-        return mat
-
-    _coo = mat.tocoo()
-    keep = np.ones(len(_coo.data), dtype=bool)
-    if source_grid_mask is not None:
-        keep &= source_grid_mask[_coo.row]
-    if target_grid_mask is not None:
-        keep &= target_grid_mask[_coo.col]
-
-    return coo_array(
-        (_coo.data[keep], (_coo.row[keep], _coo.col[keep])),
-        shape=mat.shape,
-    ).tocsc()
+    return (
+        mat,
+        src_lin,
+        tgt_lin,
+        _pack_intersections(intersections)
+        if with_intersections
+        else _no_intersections(),
+    )
 
 
 # -------------------------------------------------------------------
@@ -625,8 +875,14 @@ def _compute_transfer_matrix_rectilinear_impl(
     target_nx: int,
     target_ny: int,
     target_angle_deg: float,
-    is_sanity_check: bool = False,
-) -> csc_array:
+    with_intersections: bool = True,
+) -> Tuple[NDArrayInt, NDArrayInt, np.ndarray, np.ndarray]:
+    """
+    Returns the raw ``(src_lin, tgt_lin, weights, intersections)``
+    quadruple -- see :func:`_separable_transfer` for why the matrix is
+    not assembled here (COO/CSC reordering hazard for a separately
+    tracked ``intersections`` array).
+    """
     source_center = np.asarray(source_center, dtype=float)
     target_center = np.asarray(target_center, dtype=float)
 
@@ -634,7 +890,12 @@ def _compute_transfer_matrix_rectilinear_impl(
     source_angle_rad = np.deg2rad(source_angle_deg)
     target_angle_rad = np.deg2rad(target_angle_deg)
     rel_angle_rad = target_angle_rad - source_angle_rad
-    k_exact = np.deg2rad(rel_angle_rad) / (np.pi / 2)
+    # NOTE: `rel_angle_rad` is already in radians -- applying `np.deg2rad`
+    # here (as an earlier revision did) scales by pi/180 a second time and
+    # makes `k_exact` ~0 for every input, so only an exactly-zero relative
+    # angle was ever detected as separable and the 90/180/270-degree cases
+    # silently fell through to the much heavier non-separable clip.
+    k_exact = rel_angle_rad / (np.pi / 2)
     k_round = round(k_exact)
     is_separable = abs(k_exact - k_round) < 1e-9
 
@@ -652,7 +913,7 @@ def _compute_transfer_matrix_rectilinear_impl(
             target_nx,
             target_ny,
             k_round % 4,
-            is_sanity_check,
+            with_intersections=with_intersections,
         )
     else:
         return _nonseparable_transfer(
@@ -668,7 +929,7 @@ def _compute_transfer_matrix_rectilinear_impl(
             target_nx,
             target_ny,
             target_angle_rad,
-            is_sanity_check,
+            with_intersections=with_intersections,
         )
 
 
@@ -690,12 +951,42 @@ def _separable_transfer(
     target_nx: int,
     target_ny: int,
     k90: int,
-    is_sanity_check: bool,
-) -> csc_array:
-    """Separable transfer for relative rotation = *k90* x 90 degrees."""
+    with_intersections: bool = True,
+) -> Tuple[NDArrayInt, NDArrayInt, np.ndarray, np.ndarray]:
+    """
+    Separable transfer for relative rotation = *k90* x 90 degrees.
 
-    n_source = source_nx * source_ny
-    n_target = target_nx * target_ny
+    Returns the raw ``(src_lin, tgt_lin, weights, intersections)``
+    quadruple rather than an assembled matrix, so that
+    :func:`_compute_transfer_matrix_rectilinear_impl` /
+    :func:`_compute_transfer_matrix_rectilinear` can build the
+    ``source_indices``/``target_indices`` outputs directly from these
+    same arrays (never from ``mat.tocoo()``, whose row/col ordering
+    ``scipy.sparse`` is free to permute during ``coo_array(...).tocsc()``
+    construction -- which would silently desynchronize a separately
+    computed ``intersections`` array from the matrix's own nonzero
+    iteration order).
+
+    Returns
+    -------
+    src_lin, tgt_lin : NDArrayInt, shape (n_pairs,)
+        Source / target cell linear index of each candidate pair with
+        positive overlap (``is_sanity_check`` is applied by the
+        caller once the final matrix is assembled).
+    weights : ndarray, shape (n_pairs,)
+        ``area(S_i ∩ T_j) / area(S_i)`` for each pair.
+    intersections : ndarray of object, shape (n_pairs,)
+        One intersection ``Polygon`` (in world coordinates) per pair,
+        aligned with ``src_lin``/``tgt_lin``/``weights``. Since both
+        grids are axis-aligned in the source's local frame on this
+        path, each intersection is exactly the axis-aligned overlap
+        rectangle from the outer product of the two 1-D overlap
+        intervals -- built directly from ``lo``/``hi`` returned by
+        :func:`_compute_1d_overlaps`, with no clipping algorithm
+        needed at all (not even the numba/numpy kernels used
+        elsewhere -- the 1-D interval overlap already *is* the exact
+        rectangle bound).
+    """
 
     # -- source edges in source-local frame (always ascending) --
     src_x_edges = (np.arange(source_nx + 1) - source_nx / 2) * source_dx
@@ -731,11 +1022,12 @@ def _separable_transfer(
     tgt_x_edges, tx_perm = _sort_edges(raw_x, sx_n)
     tgt_y_edges, ty_perm = _sort_edges(raw_y, sy_n)
 
-    is_x, it_x_sorted, ox = _compute_1d_overlaps(src_x_edges, tgt_x_edges)
-    is_y, it_y_sorted, oy = _compute_1d_overlaps(src_y_edges, tgt_y_edges)
+    is_x, it_x_sorted, ox, xlo, xhi = _compute_1d_overlaps(src_x_edges, tgt_x_edges)
+    is_y, it_y_sorted, oy, ylo, yhi = _compute_1d_overlaps(src_y_edges, tgt_y_edges)
 
+    _e_int = np.empty(0, dtype=np.intp)
     if len(is_x) == 0 or len(is_y) == 0:
-        return csc_array((n_source, n_target))
+        return _e_int, _e_int, np.empty(0), np.empty(0, dtype=object)
 
     it_x_orig = tx_perm[it_x_sorted]
     it_y_orig = ty_perm[it_y_sorted]
@@ -757,14 +1049,33 @@ def _separable_transfer(
     tgt_lin = tgt_jy * target_nx + tgt_ix
     weights = np.repeat(ox, ny_pairs) * np.tile(oy, nx_pairs) / (source_dx * source_dy)
 
-    mat = coo_array(
-        (weights, (src_lin, tgt_lin)),
-        shape=(n_source, n_target),
-    ).tocsc()
+    # -- exact intersection rectangles: outer product of the x- and
+    #    y-overlap intervals, in source-local frame, then rotated to
+    #    world coordinates. Every entry here is a genuine 4-vertex
+    #    axis-aligned (in local frame) rectangle -- no padding/vertex
+    #    count bookkeeping needed since the vertex count is always
+    #    exactly 4. --
+    if with_intersections:
+        rect_xlo = np.repeat(xlo, ny_pairs)
+        rect_xhi = np.repeat(xhi, ny_pairs)
+        rect_ylo = np.tile(ylo, nx_pairs)
+        rect_yhi = np.tile(yhi, nx_pairs)
+        local_vx = np.stack(
+            [rect_xlo, rect_xhi, rect_xhi, rect_xlo], axis=-1
+        )  # (n_pairs, 4)
+        local_vy = np.stack([rect_ylo, rect_ylo, rect_yhi, rect_yhi], axis=-1)
+        n_verts = np.full(len(rect_xlo), 4, dtype=np.intp)
 
-    if is_sanity_check:
-        _check_conservation(mat)
-    return mat
+        intersections = _polygons_from_padded_verts(
+            local_vx,
+            local_vy,
+            n_verts,
+            local_to_world=(source_center, ca, sa),
+        )
+    else:
+        intersections = _no_intersections()
+
+    return src_lin, tgt_lin, weights, intersections
 
 
 def _sort_edges(edges: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
@@ -776,17 +1087,22 @@ def _sort_edges(edges: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
 
 def _compute_1d_overlaps(
     edges_a: np.ndarray, edges_b: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Find all overlapping interval pairs between two sorted edge arrays.
 
-    Returns ``(idx_a, idx_b, overlaps)`` with only positive overlaps.
+    Returns ``(idx_a, idx_b, overlaps, lo, hi)`` with only positive
+    overlaps, where ``lo``/``hi`` are the overlap interval's own
+    bounds (``lo = max(left_a, left_b)``, ``hi = min(right_a,
+    right_b)``) -- needed by callers that build exact intersection
+    rectangles (not just areas) from the same 1-D overlap computation.
     """
     na = len(edges_a) - 1
     nb = len(edges_b) - 1
     if na == 0 or nb == 0:
         _e = np.empty(0, dtype=np.intp)
-        return _e, _e, np.empty(0)
+        _f = np.empty(0)
+        return _e, _e, _f, _f, _f
 
     right_b, left_b = edges_b[1:], edges_b[:-1]
     left_a, right_a = edges_a[:-1], edges_a[1:]
@@ -798,7 +1114,8 @@ def _compute_1d_overlaps(
     total = counts.sum()
     if total == 0:
         _e = np.empty(0, dtype=np.intp)
-        return _e, _e, np.empty(0)
+        _f = np.empty(0)
+        return _e, _e, _f, _f, _f
 
     idx_a = np.repeat(np.arange(na, dtype=np.intp), counts)
     cum = np.empty(na + 1, dtype=np.intp)
@@ -807,11 +1124,11 @@ def _compute_1d_overlaps(
     group_offset = np.arange(total, dtype=np.intp) - np.repeat(cum[:-1], counts)
     idx_b = group_offset + np.repeat(j_starts, counts)
 
-    overlaps = np.minimum(right_a[idx_a], right_b[idx_b]) - np.maximum(
-        left_a[idx_a], left_b[idx_b]
-    )
+    lo = np.maximum(left_a[idx_a], left_b[idx_b])
+    hi = np.minimum(right_a[idx_a], right_b[idx_b])
+    overlaps = hi - lo
     valid = overlaps > 1e-15
-    return idx_a[valid], idx_b[valid], overlaps[valid]
+    return idx_a[valid], idx_b[valid], overlaps[valid], lo[valid], hi[valid]
 
 
 # ===================================================================
@@ -839,13 +1156,31 @@ def _nonseparable_transfer(
     target_nx: int,
     target_ny: int,
     target_angle: float,
-    is_sanity_check: bool,
-) -> csc_array:
-    """Transfer matrix for two rectilinear grids at an arbitrary angle."""
+    with_intersections: bool = True,
+) -> Tuple[NDArrayInt, NDArrayInt, np.ndarray, np.ndarray]:
+    """
+    Transfer matrix for two rectilinear grids at an arbitrary angle.
 
-    n_source = source_nx * source_ny
-    n_target = target_nx * target_ny
+    Returns the raw ``(src_lin, tgt_lin, weights, intersections)``
+    quadruple rather than an assembled matrix -- see
+    :func:`_separable_transfer` for why (avoiding the COO/CSC
+    reordering hazard that would otherwise desynchronize
+    ``intersections`` from the matrix's own nonzero iteration order).
+
+    Returns
+    -------
+    src_lin, tgt_lin : NDArrayInt, shape (n_pairs,)
+    weights : ndarray, shape (n_pairs,)
+    intersections : ndarray of object, shape (n_pairs,)
+        One intersection ``Polygon`` (in world coordinates) per pair,
+        built via :func:`_polygons_from_padded_verts` from the same
+        clipped vertices the area computation already produced -- no
+        GEOS clipping call, only vectorized ``shapely.polygons``
+        construction.
+    """
+
     src_cell_area = source_dx * source_dy
+    n_target = target_nx * target_ny
 
     # -- source edges in source-local frame --
     src_x_edges = (np.arange(source_nx + 1) - source_nx / 2) * source_dx
@@ -907,7 +1242,8 @@ def _nonseparable_transfer(
     total_pairs = int(counts_per_tgt.sum())
 
     if total_pairs == 0:
-        return csc_array((n_source, n_target))
+        _e = np.empty(0, dtype=np.intp)
+        return _e, _e, np.empty(0), np.empty(0, dtype=object)
 
     # Expand into flat pair arrays
     tgt_flat_idx = np.repeat(np.arange(n_target, dtype=np.intp), counts_per_tgt)
@@ -933,8 +1269,8 @@ def _nonseparable_transfer(
     pair_tvx = template[None, :, 0] + tcx_flat[tgt_flat_idx, None]  # (N, 4)
     pair_tvy = template[None, :, 1] + tcy_flat[tgt_flat_idx, None]
 
-    # -- compute intersection areas --
-    areas = _batch_clip_areas(
+    # -- compute intersection areas AND clipped vertices --
+    areas, out_x, out_y, out_n = _batch_clip_areas_and_verts(
         np.ascontiguousarray(pair_tvx),
         np.ascontiguousarray(pair_tvy),
         pair_xmin,
@@ -943,18 +1279,24 @@ def _nonseparable_transfer(
         pair_ymax,
     )
 
-    # -- filter and assemble sparse matrix --
+    # -- filter --
     valid = areas > 1e-15
     weights = areas[valid] / src_cell_area
 
-    mat = coo_array(
-        (weights, (src_lin[valid], tgt_lin[valid])),
-        shape=(n_source, n_target),
-    ).tocsc()
+    # -- build intersection geometry from the same clip vertices, in
+    #    the source's world frame (out_x/out_y are in source-local
+    #    frame, matching the frame `pair_xmin` etc. were computed in) --
+    if with_intersections:
+        intersections = _polygons_from_padded_verts(
+            out_x[valid],
+            out_y[valid],
+            out_n[valid],
+            local_to_world=(source_center, ca, sa),
+        )
+    else:
+        intersections = _no_intersections()
 
-    if is_sanity_check:
-        _check_conservation(mat)
-    return mat
+    return src_lin[valid], tgt_lin[valid], weights, intersections
 
 
 # ===================================================================
@@ -962,33 +1304,55 @@ def _nonseparable_transfer(
 # ===================================================================
 
 
-def _batch_clip_areas(
+def _batch_clip_areas_and_verts(
     tvx: np.ndarray,
     tvy: np.ndarray,
     xmin: np.ndarray,
     ymin: np.ndarray,
     xmax: np.ndarray,
     ymax: np.ndarray,
-) -> np.ndarray:
-    """Dispatch to the fastest available back-end."""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Dispatch to the fastest available back-end, also returning the
+    clipped polygon vertices (padded to a fixed width, with a
+    per-pair vertex count) so callers can build exact ``shapely``
+    geometry from them via a single vectorized ``shapely.polygons``
+    call -- without ever invoking GEOS's own clipping algorithm.
+
+    Returns
+    -------
+    areas : ndarray, shape (N,)
+    out_x, out_y : ndarray, shape (N, 8)
+        Padded clipped-polygon vertex coordinates; only the first
+        ``out_n[k]`` columns of row ``k`` are meaningful.
+    out_n : ndarray, shape (N,)
+        Number of meaningful vertices per row (0 for an empty clip).
+    """
     if _HAS_NUMBA:
-        return _batch_clip_numba(tvx, tvy, xmin, ymin, xmax, ymax)
-    return _batch_clip_numpy(tvx, tvy, xmin, ymin, xmax, ymax)
+        return _batch_clip_numba_and_verts(tvx, tvy, xmin, ymin, xmax, ymax)
+    return _batch_clip_numpy_and_verts(tvx, tvy, xmin, ymin, xmax, ymax)
 
 
 # ---- numba back-end ------------------------------------------------
 
 
 @njit(cache=True)
-def _clip_area_single(
+def _clip_single_with_verts(
     vx: np.ndarray,
     vy: np.ndarray,
     xmin: float,
     ymin: float,
     xmax: float,
     ymax: float,
-) -> float:
-    """SH clip of a 4-vertex polygon against an AA rect -> area."""
+    out_x: np.ndarray,
+    out_y: np.ndarray,
+) -> Tuple[float, int]:
+    """
+    Sutherland-Hodgman clip of a 4-vertex polygon against an
+    axis-aligned rect, also writing the clipped polygon's vertices
+    into ``out_x``/``out_y`` (each length >= 8) and returning
+    ``(area, n_verts)``.
+    """
     MAX_V = 8
     ax = np.empty(MAX_V)
     ay = np.empty(MAX_V)
@@ -1004,7 +1368,7 @@ def _clip_area_single(
         ev = edges[e]
         n_out = 0
         if n_in < 3:
-            return 0.0
+            return 0.0, 0
         for i in range(n_in):
             pi = n_in - 1 if i == 0 else i - 1
             if e < 2:  # clip on x
@@ -1035,54 +1399,65 @@ def _clip_area_single(
             ay[p] = by[p]
 
     if n_in < 3:
-        return 0.0
+        return 0.0, 0
     area = 0.0
     for i in range(n_in):
         j = (i + 1) % n_in
         area += ax[i] * ay[j] - ax[j] * ay[i]
-    return abs(area) * 0.5
+        out_x[i] = ax[i]
+        out_y[i] = ay[i]
+    return abs(area) * 0.5, n_in
 
 
 @njit(parallel=True, cache=True)
-def _batch_clip_numba(
+def _batch_clip_numba_and_verts(
     tvx: np.ndarray,
     tvy: np.ndarray,
     xmin: np.ndarray,
     ymin: np.ndarray,
     xmax: np.ndarray,
     ymax: np.ndarray,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     N = len(xmin)
     areas = np.empty(N)
+    out_x = np.zeros((N, 8))
+    out_y = np.zeros((N, 8))
+    out_n = np.zeros(N, dtype=np.intp)
     for idx in prange(N):  # ty:ignore[not-iterable]
-        areas[idx] = _clip_area_single(
+        area, n_verts = _clip_single_with_verts(
             tvx[idx],
             tvy[idx],
             xmin[idx],
             ymin[idx],
             xmax[idx],
             ymax[idx],
+            out_x[idx],
+            out_y[idx],
         )
-    return areas
+        areas[idx] = area
+        out_n[idx] = n_verts
+    return areas, out_x, out_y, out_n
 
 
 # ---- numpy fallback ------------------------------------------------
 
 
-def _batch_clip_numpy(
+def _batch_clip_numpy_core(
     tvx: np.ndarray,
     tvy: np.ndarray,
     xmin: np.ndarray,
     ymin: np.ndarray,
     xmax: np.ndarray,
     ymax: np.ndarray,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Vectorised intersection areas via vertex collection + shoelace.
-
-    Collects vertices from three sources (target corners in source,
-    source corners in target, edge-edge intersections), sorts by angle
-    from centroid, and applies the shoelace formula - all in numpy.
+    Shared core for the numpy fallback: collects vertices from three
+    sources (target corners in source, source corners in target,
+    edge-edge intersections), sorts by angle from centroid, and
+    returns both the shoelace areas and the angle-sorted vertex
+    buffer -- so the vertex-returning entry point
+    (:func:`_batch_clip_numpy_and_verts`) does not have to duplicate
+    the vertex-collection logic.
     """
     N = len(xmin)
 
@@ -1176,102 +1551,233 @@ def _batch_clip_numpy(
     closing = lx * sy[:, 0] - sx[:, 0] * ly
     areas = 0.5 * np.abs((cross * emask).sum(1) + closing)
     areas[vc < 3] = 0.0
-    return areas
+    vc = np.where(areas > 0.0, vc, 0)
+    return areas, sx, sy, vc, order
+
+
+def _batch_clip_numpy_and_verts(
+    tvx: np.ndarray,
+    tvy: np.ndarray,
+    xmin: np.ndarray,
+    ymin: np.ndarray,
+    xmax: np.ndarray,
+    ymax: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Numpy-only fallback for :func:`_batch_clip_numba_and_verts`: vertex
+    collection + angle-sort + shoelace, returning the angle-sorted
+    clipped-polygon vertices (padded to 24 columns, matching
+    ``_batch_clip_numpy_core``'s internal buffer width) plus a
+    per-row vertex count, so callers can build exact ``shapely``
+    geometry from them.
+    """
+    areas, sx, sy, vc, _order = _batch_clip_numpy_core(tvx, tvy, xmin, ymin, xmax, ymax)
+    return areas, sx, sy, vc
 
 
 # ===================================================================
-# Generalized N-vertex Sutherland-Hodgman clip (numba primary, numpy
-# fallback), used by the mixed path to bypass Shapely entirely when
-# the arbitrary-side polygons are convex.
+# Generalized N-vertex Sutherland-Hodgman clip against an
+# AXIS-ALIGNED RECTANGLE (numba primary, numpy fallback), used by the
+# rectilinear/polygon mixed path AND the rectilinear/TriMesh dedicated
+# path to bypass Shapely entirely when the arbitrary-side polygons are
+# convex (this always includes TriMesh triangles).
 # ===================================================================
 
-_MAX_CLIP_VERTS = 32  # generous headroom for polygon-vs-rect clip output
 
-
-def _polygons_are_convex(poly_polygons: np.ndarray) -> NDArrayBool:
+class _PolygonVertexData:
     """
-    Vectorised convexity test for an array of shapely Polygon objects.
+    Exterior-ring vertex data for a batch of shapely polygons,
+    extracted from GEOS exactly **once**.
 
-    A simple polygon (no self-intersections, no holes) is convex iff
-    its signed cross product at every vertex has a constant sign. Uses
-    a single batched ``shapely.get_coordinates`` call plus
-    ``np.minimum.reduceat`` / ``np.maximum.reduceat`` (mirroring the
-    bbox computation in `_polygon_candidate_ranges_in_rectilinear_grid`)
-    to test the per-polygon sign-consistency without any Python loop
-    over polygons or their vertices.
+    Three separate consumers in this module need the same exterior
+    coordinates of the same polygon batch: the local-frame bounding-box
+    candidate search, the convexity test, and the padded vertex buffers
+    fed to the Sutherland-Hodgman clip kernels. Each of those used to
+    run its own ``get_exterior_ring`` + ``get_coordinates`` pair (and
+    the clip-buffer one ran it on an index array containing *duplicate*
+    polygons -- once per candidate pair rather than once per polygon),
+    so a polygon overlapping nine grid cells had its coordinates pulled
+    out of GEOS eleven times. This class holds the single extraction all
+    three now share.
 
-    Polygons with interior rings (holes) are conservatively treated as
-    non-convex, since a polygon with a hole can never be convex.
+    Attributes
+    ----------
+    x, y : ndarray, shape (n_coords,)
+        Flat world-frame exterior coordinates of every polygon,
+        concatenated in polygon order.
+    starts : NDArrayInt, shape (n_poly,)
+        Index into ``x``/``y`` where each polygon's ring begins.
+    true_n : NDArrayInt, shape (n_poly,)
+        Vertex count per polygon, *excluding* the duplicated closing
+        vertex that shapely stores at the end of every ring.
+    has_holes : NDArrayBool, shape (n_poly,)
+        Whether each polygon has at least one interior ring.
     """
-    n_poly = len(poly_polygons)
-    if n_poly == 0:
-        return np.empty(0, dtype=bool)
 
-    has_holes = shapely.get_num_interior_rings(poly_polygons) > 0
+    __slots__ = ("x", "y", "starts", "true_n", "has_holes")
 
-    exteriors = shapely.get_exterior_ring(poly_polygons)
-    coords, coord_poly_idx = shapely.get_coordinates(exteriors, return_index=True)
-    # coord_poly_idx is sorted/non-decreasing; every polygon contributes
-    # at least 4 points (3 distinct + closing repeat) since shapely
-    # rejects degenerate rings, so `counts >= 4` always holds here.
-    boundaries = np.searchsorted(coord_poly_idx, np.arange(n_poly + 1), side="left")
-    starts = boundaries[:-1]
-    stops = boundaries[1:]
-    counts = stops - starts  # includes the repeated closing vertex
+    def __init__(self, poly_polygons: np.ndarray) -> None:
+        n_poly = len(poly_polygons)
+        if n_poly == 0:
+            _e = np.empty(0, dtype=np.intp)
+            self.x = np.empty(0)
+            self.y = np.empty(0)
+            self.starts = _e
+            self.true_n = _e
+            self.has_holes = np.empty(0, dtype=bool)
+            return
 
-    x = coords[:, 0]
-    y = coords[:, 1]
+        self.has_holes = shapely.get_num_interior_rings(poly_polygons) > 0
+        exteriors = shapely.get_exterior_ring(poly_polygons)
+        coords, coord_poly_idx = shapely.get_coordinates(exteriors, return_index=True)
+        self.x = coords[:, 0]
+        self.y = coords[:, 1]
+        # coord_poly_idx is sorted/non-decreasing, so searchsorted gives
+        # the per-polygon ring boundaries directly. Counts follow from
+        # the boundaries themselves -- a separate `np.bincount` pass
+        # (as an earlier revision used) recomputes the same segmentation.
+        boundaries = np.searchsorted(coord_poly_idx, np.arange(n_poly + 1), side="left")
+        self.starts = boundaries[:-1]
+        # shapely repeats the first vertex at the end of every ring;
+        # drop it so `true_n` is the real vertex count.
+        self.true_n = np.diff(boundaries) - 1
 
-    # "previous" vertex per point: for each point at global index k
-    # belonging to polygon p with local position L = k - starts[p],
-    # prev(k) = starts[p] + (L - 1) mod (counts[p] - 1) using the
-    # *true* vertex count (counts[p] - 1, since the last coordinate
-    # duplicates the first). Build this via a per-point offset array.
-    true_n = counts - 1  # true vertex count per polygon
-    point_poly_idx = np.repeat(np.arange(n_poly), counts)
-    local_pos = np.arange(len(x)) - np.repeat(starts, counts)
-    rep_true_n = np.repeat(true_n, counts)
+    @property
+    def max_verts(self) -> int:
+        """Largest true vertex count in the batch (0 if empty)."""
+        return int(self.true_n.max()) if len(self.true_n) else 0
 
-    # drop the duplicated closing vertex (local_pos == true_n) from
-    # the active vertex set used for the cross-product test.
-    is_closing = local_pos == rep_true_n
-    active = ~is_closing
+    def local_frame_bboxes(
+        self, center: np.ndarray, angle_rad: float
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Per-polygon axis-aligned bounding box in a rotated grid's local
+        frame, as ``(xmin, xmax, ymin, ymax)``.
+        """
+        if len(self.starts) == 0:
+            _f = np.empty(0)
+            return _f, _f, _f, _f
+        ca, sa = np.cos(angle_rad), np.sin(angle_rad)
+        dxw = self.x - center[0]
+        dyw = self.y - center[1]
+        local_x = dxw * ca + dyw * sa
+        local_y = -dxw * sa + dyw * ca
+        return (
+            np.minimum.reduceat(local_x, self.starts),
+            np.maximum.reduceat(local_x, self.starts),
+            np.minimum.reduceat(local_y, self.starts),
+            np.maximum.reduceat(local_y, self.starts),
+        )
 
-    active_poly_idx = point_poly_idx[active]
-    active_local_pos = local_pos[active]
-    active_true_n = rep_true_n[active]
-    active_x = x[active]
-    active_y = y[active]
-    active_starts = starts[active_poly_idx]
+    def padded_vertex_buffers(
+        self,
+        width: int,
+        local_to_grid: Optional[Tuple[np.ndarray, float]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Scatter every polygon's (non-closing) vertices into fixed-width
+        ``(n_poly, width)`` buffers suitable for the clip kernels.
 
-    prev_local = (active_local_pos - 1) % active_true_n
-    next_local = (active_local_pos + 1) % active_true_n
-    prev_global = active_starts + prev_local
-    next_global = active_starts + next_local
+        Built **per polygon**, not per candidate pair: callers gather
+        the rows they need with a fancy index, which is a plain memcpy
+        rather than a repeated GEOS coordinate extraction.
 
-    px, py = x[prev_global], y[prev_global]
-    nx_, ny_ = x[next_global], y[next_global]
+        Parameters
+        ----------
+        width : int
+            Buffer width; must be at least :attr:`max_verts`.
+        local_to_grid : (center, angle_rad), optional
+            If given, coordinates are rotated from world into that
+            grid's local (unrotated) frame first -- required by the
+            kernels that clip against an axis-aligned rectangle, since
+            a rotated grid's cells are only axis-aligned in their own
+            local frame.
+        """
+        n_poly = len(self.starts)
+        vx = np.zeros((n_poly, width))
+        vy = np.zeros((n_poly, width))
+        if n_poly == 0:
+            return vx, vy
 
-    e1x, e1y = active_x - px, active_y - py
-    e2x, e2y = nx_ - active_x, ny_ - active_y
-    cross = e1x * e2y - e1y * e2x
+        x, y = self.x, self.y
+        if local_to_grid is not None:
+            center, angle_rad = local_to_grid
+            ca, sa = np.cos(angle_rad), np.sin(angle_rad)
+            dxw = x - center[0]
+            dyw = y - center[1]
+            x = dxw * ca + dyw * sa
+            y = -dxw * sa + dyw * ca
 
-    nonzero_mask = np.abs(cross) > 1e-15
-    pos_mask = nonzero_mask & (cross > 0)
-    neg_mask = nonzero_mask & (cross < 0)
+        counts = self.true_n + 1  # includes the closing vertex
+        point_poly_idx = np.repeat(np.arange(n_poly), counts)
+        local_col = np.arange(len(x)) - self.starts[point_poly_idx]
+        # drop the closing vertex, which always lands at local_col == true_n
+        keep = local_col < self.true_n[point_poly_idx]
+        vx[point_poly_idx[keep], local_col[keep]] = x[keep]
+        vy[point_poly_idx[keep], local_col[keep]] = y[keep]
+        return vx, vy
 
-    has_pos = np.zeros(n_poly, dtype=bool)
-    has_neg = np.zeros(n_poly, dtype=bool)
-    np.logical_or.at(has_pos, active_poly_idx[pos_mask], True)
-    np.logical_or.at(has_neg, active_poly_idx[neg_mask], True)
+    def convexity(self) -> NDArrayBool:
+        """
+        Vectorised per-polygon convexity test.
 
-    too_few_verts = true_n < 3
-    convex = ~(has_pos & has_neg) & ~too_few_verts & ~has_holes
-    return convex
+        A simple polygon (no self-intersections, no holes) is convex iff
+        the signed cross product at every vertex has a constant sign.
+        Polygons with interior rings are conservatively reported
+        non-convex, since a polygon with a hole can never be convex.
+
+        Notes
+        -----
+        Callers that already know every polygon is convex (e.g. a batch
+        of :class:`~quickpaver._grid.TriMesh` triangles, convex by
+        construction) should skip this rather than call it -- see
+        ``polygon_grid_is_convex`` on
+        :func:`_compute_transfer_matrix_mixed`. Better still, the
+        dedicated :func:`_compute_transfer_matrix_rect_trimesh` path
+        never builds Shapely polygons for the mesh side at all.
+        """
+        n_poly = len(self.starts)
+        if n_poly == 0:
+            return np.empty(0, dtype=bool)
+
+        x, y = self.x, self.y
+        counts = self.true_n + 1
+        point_poly_idx = np.repeat(np.arange(n_poly), counts)
+        local_pos = np.arange(len(x)) - np.repeat(self.starts, counts)
+        rep_true_n = np.repeat(self.true_n, counts)
+
+        active = local_pos < rep_true_n  # drop the duplicated closing vertex
+        active_poly_idx = point_poly_idx[active]
+        active_local_pos = local_pos[active]
+        active_true_n = rep_true_n[active]
+        active_x = x[active]
+        active_y = y[active]
+        active_starts = self.starts[active_poly_idx]
+
+        prev_global = active_starts + (active_local_pos - 1) % active_true_n
+        next_global = active_starts + (active_local_pos + 1) % active_true_n
+
+        px, py = x[prev_global], y[prev_global]
+        nx_, ny_ = x[next_global], y[next_global]
+
+        e1x, e1y = active_x - px, active_y - py
+        e2x, e2y = nx_ - active_x, ny_ - active_y
+        cross = e1x * e2y - e1y * e2x
+
+        nonzero_mask = np.abs(cross) > 1e-15
+        pos_mask = nonzero_mask & (cross > 0)
+        neg_mask = nonzero_mask & (cross < 0)
+
+        has_pos = np.zeros(n_poly, dtype=bool)
+        has_neg = np.zeros(n_poly, dtype=bool)
+        np.logical_or.at(has_pos, active_poly_idx[pos_mask], True)
+        np.logical_or.at(has_neg, active_poly_idx[neg_mask], True)
+
+        return ~(has_pos & has_neg) & ~(self.true_n < 3) & ~self.has_holes
 
 
 @njit(cache=True)
-def _clip_area_single_nverts(
+def _clip_nverts_with_verts(
     vx: np.ndarray,
     vy: np.ndarray,
     n_verts: int,
@@ -1279,17 +1785,14 @@ def _clip_area_single_nverts(
     ymin: float,
     xmax: float,
     ymax: float,
-) -> float:
+    out_x: np.ndarray,
+    out_y: np.ndarray,
+) -> Tuple[float, int]:
     """
     Sutherland-Hodgman clip of a convex ``n_verts``-vertex polygon
-    (vertices given CCW or CW, either works for an area-only result)
-    against an axis-aligned rectangle -> clipped area.
-
-    ``vx``/``vy`` are fixed-size buffers of length ``_MAX_CLIP_VERTS``;
-    only the first ``n_verts`` entries are meaningful. The output
-    polygon can gain at most one extra vertex per clip edge (4 edges),
-    so ``_MAX_CLIP_VERTS`` must be >= n_verts + 4 for the largest input
-    the caller will pass in.
+    against an axis-aligned rect, also writing the clipped polygon's
+    vertices into ``out_x``/``out_y`` (each length >=
+    ``_MAX_CLIP_VERTS``) and returning ``(area, n_out_verts)``.
     """
     MAX_V = _MAX_CLIP_VERTS
     ax = np.empty(MAX_V)
@@ -1306,7 +1809,7 @@ def _clip_area_single_nverts(
         ev = edges[e]
         n_out = 0
         if n_in < 3:
-            return 0.0
+            return 0.0, 0
         for i in range(n_in):
             pi = n_in - 1 if i == 0 else i - 1
             if e < 2:  # clip on x
@@ -1337,16 +1840,18 @@ def _clip_area_single_nverts(
             ay[p] = by[p]
 
     if n_in < 3:
-        return 0.0
+        return 0.0, 0
     area = 0.0
     for i in range(n_in):
         j = (i + 1) % n_in
         area += ax[i] * ay[j] - ax[j] * ay[i]
-    return abs(area) * 0.5
+        out_x[i] = ax[i]
+        out_y[i] = ay[i]
+    return abs(area) * 0.5, n_in
 
 
 @njit(parallel=True, cache=True)
-def _batch_clip_numba_nverts(
+def _batch_clip_numba_nverts_and_verts(
     vx: np.ndarray,
     vy: np.ndarray,
     n_verts: np.ndarray,
@@ -1354,16 +1859,15 @@ def _batch_clip_numba_nverts(
     ymin: np.ndarray,
     xmax: np.ndarray,
     ymax: np.ndarray,
-) -> np.ndarray:
-    """
-    Parallel batch clip of ``N`` convex polygons (each padded to
-    ``vx.shape[1]`` columns, with only the first ``n_verts[k]``
-    meaningful) against ``N`` axis-aligned rectangles.
-    """
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     N = len(xmin)
+    width = vx.shape[1]
     areas = np.empty(N)
+    out_x = np.zeros((N, width))
+    out_y = np.zeros((N, width))
+    out_n = np.zeros(N, dtype=np.intp)
     for idx in prange(N):  # ty:ignore[not-iterable]
-        areas[idx] = _clip_area_single_nverts(
+        area, n_out_verts = _clip_nverts_with_verts(
             vx[idx],
             vy[idx],
             n_verts[idx],
@@ -1371,39 +1875,20 @@ def _batch_clip_numba_nverts(
             ymin[idx],
             xmax[idx],
             ymax[idx],
+            out_x[idx],
+            out_y[idx],
         )
-    return areas
+        areas[idx] = area
+        out_n[idx] = n_out_verts
+    return areas, out_x, out_y, out_n
 
 
-def _batch_clip_numpy_nverts(
-    vx: np.ndarray,
-    vy: np.ndarray,
-    n_verts: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> np.ndarray:
-    """
-    Numpy fallback for :func:`_batch_clip_numba_nverts`: a simple
-    per-pair Python loop calling a pure-Python Sutherland-Hodgman clip.
-    Only used when numba is unavailable, so raw Python performance here
-    is acceptable -- it is still far cheaper than a Shapely
-    intersection call per pair since it avoids GEOS object overhead.
-    """
-    N = len(xmin)
-    areas = np.empty(N)
-    for k in range(N):
-        m = int(n_verts[k])
-        poly = list(zip(vx[k, :m].tolist(), vy[k, :m].tolist()))
-        areas[k] = _sh_clip_area_python(poly, xmin[k], ymin[k], xmax[k], ymax[k])
-    return areas
-
-
-def _sh_clip_area_python(
+def _sh_clip_python_with_verts(
     poly: list, xmin: float, ymin: float, xmax: float, ymax: float
-) -> float:
-    """Pure-Python Sutherland-Hodgman clip + shoelace, N-vertex input."""
+) -> Tuple[float, list]:
+    """Pure-Python Sutherland-Hodgman clip of an N-vertex polygon
+    against an axis-aligned rect, returning ``(area, clipped_verts)``.
+    """
     edges = (
         ("x", ">=", xmin),
         ("x", "<=", xmax),
@@ -1413,7 +1898,7 @@ def _sh_clip_area_python(
     output = poly
     for axis, op, ev in edges:
         if len(output) < 3:
-            return 0.0
+            return 0.0, []
         inp = output
         output = []
         for i in range(len(inp)):
@@ -1432,16 +1917,16 @@ def _sh_clip_area_python(
             if c_in:
                 output.append(cur)
     if len(output) < 3:
-        return 0.0
+        return 0.0, []
     area = 0.0
     n = len(output)
     for i in range(n):
         j = (i + 1) % n
         area += output[i][0] * output[j][1] - output[j][0] * output[i][1]
-    return abs(area) * 0.5
+    return abs(area) * 0.5, output
 
 
-def _batch_clip_areas_nverts(
+def _batch_clip_numpy_nverts_and_verts(
     vx: np.ndarray,
     vy: np.ndarray,
     n_verts: np.ndarray,
@@ -1449,11 +1934,261 @@ def _batch_clip_areas_nverts(
     ymin: np.ndarray,
     xmax: np.ndarray,
     ymax: np.ndarray,
-) -> np.ndarray:
-    """Dispatch to the fastest available N-vertex clip back-end."""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Numpy/pure-Python fallback for :func:`_batch_clip_numba_nverts_and_verts`."""
+    N = len(xmin)
+    width = vx.shape[1]
+    areas = np.empty(N)
+    out_x = np.zeros((N, width))
+    out_y = np.zeros((N, width))
+    out_n = np.zeros(N, dtype=np.intp)
+    for k in range(N):
+        m = int(n_verts[k])
+        poly = list(zip(vx[k, :m].tolist(), vy[k, :m].tolist()))
+        area, out_poly = _sh_clip_python_with_verts(
+            poly, xmin[k], ymin[k], xmax[k], ymax[k]
+        )
+        areas[k] = area
+        mo = len(out_poly)
+        out_n[k] = mo
+        for p in range(mo):
+            out_x[k, p] = out_poly[p][0]
+            out_y[k, p] = out_poly[p][1]
+    return areas, out_x, out_y, out_n
+
+
+def _batch_clip_areas_and_verts_nverts(
+    vx: np.ndarray,
+    vy: np.ndarray,
+    n_verts: np.ndarray,
+    xmin: np.ndarray,
+    ymin: np.ndarray,
+    xmax: np.ndarray,
+    ymax: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Dispatch to the fastest available N-vertex clip back-end, also
+    returning clipped vertices."""
     if _HAS_NUMBA:
-        return _batch_clip_numba_nverts(vx, vy, n_verts, xmin, ymin, xmax, ymax)
-    return _batch_clip_numpy_nverts(vx, vy, n_verts, xmin, ymin, xmax, ymax)
+        return _batch_clip_numba_nverts_and_verts(
+            vx, vy, n_verts, xmin, ymin, xmax, ymax
+        )
+    return _batch_clip_numpy_nverts_and_verts(vx, vy, n_verts, xmin, ymin, xmax, ymax)
+
+
+# ===================================================================
+# Fixed 3-vertex Sutherland-Hodgman clip against an axis-aligned
+# rectangle, specialized for triangle subjects (used by the dedicated
+# rectilinear/TriMesh path). This is functionally a special case of
+# `_clip_nverts_with_verts` with `n_verts == 3` hard-coded, but
+# skipping the ragged bookkeeping (no `n_verts` array, no padding
+# beyond the fixed 3 input columns) shaves a bit more overhead off the
+# already-cheap triangle case, and lets the caller skip building an
+# `n_verts` array full of 3s.
+# ===================================================================
+
+
+@njit(cache=True)
+def _clip_tri_rect_with_verts(
+    vx0: float,
+    vx1: float,
+    vx2: float,
+    vy0: float,
+    vy1: float,
+    vy2: float,
+    xmin: float,
+    ymin: float,
+    xmax: float,
+    ymax: float,
+    out_x: np.ndarray,
+    out_y: np.ndarray,
+) -> Tuple[float, int]:
+    """
+    Sutherland-Hodgman clip of a 3-vertex triangle against an
+    axis-aligned rect, also writing the clipped polygon's vertices
+    into ``out_x``/``out_y`` (each length >= 8) and returning
+    ``(area, n_verts)``.
+    """
+    MAX_V = 8
+    ax = np.empty(MAX_V)
+    ay = np.empty(MAX_V)
+    bx = np.empty(MAX_V)
+    by = np.empty(MAX_V)
+    ax[0], ax[1], ax[2] = vx0, vx1, vx2
+    ay[0], ay[1], ay[2] = vy0, vy1, vy2
+    n_in = 3
+
+    edges = (xmin, xmax, ymin, ymax)
+    for e in range(4):
+        ev = edges[e]
+        n_out = 0
+        if n_in < 3:
+            return 0.0, 0
+        for i in range(n_in):
+            pi = n_in - 1 if i == 0 else i - 1
+            if e < 2:  # clip on x
+                cc = ax[i]
+                pc = ax[pi]
+            else:  # clip on y
+                cc = ay[i]
+                pc = ay[pi]
+            if e == 0 or e == 2:  # keep >=
+                c_in = cc >= ev
+                p_in = pc >= ev
+            else:  # keep <=
+                c_in = cc <= ev
+                p_in = pc <= ev
+            if p_in != c_in:
+                d = cc - pc
+                t = (ev - pc) / d if d != 0.0 else 0.0
+                bx[n_out] = ax[pi] + t * (ax[i] - ax[pi])
+                by[n_out] = ay[pi] + t * (ay[i] - ay[pi])
+                n_out += 1
+            if c_in:
+                bx[n_out] = ax[i]
+                by[n_out] = ay[i]
+                n_out += 1
+        n_in = n_out
+        for p in range(n_in):
+            ax[p] = bx[p]
+            ay[p] = by[p]
+
+    if n_in < 3:
+        return 0.0, 0
+    area = 0.0
+    for i in range(n_in):
+        j = (i + 1) % n_in
+        area += ax[i] * ay[j] - ax[j] * ay[i]
+        out_x[i] = ax[i]
+        out_y[i] = ay[i]
+    return abs(area) * 0.5, n_in
+
+
+@njit(parallel=True, cache=True)
+def _batch_clip_tri_rect_and_verts(
+    vx: np.ndarray,
+    vy: np.ndarray,
+    xmin: np.ndarray,
+    ymin: np.ndarray,
+    xmax: np.ndarray,
+    ymax: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    N = len(xmin)
+    areas = np.empty(N)
+    out_x = np.zeros((N, 8))
+    out_y = np.zeros((N, 8))
+    out_n = np.zeros(N, dtype=np.intp)
+    for idx in prange(N):  # ty:ignore[not-iterable]
+        area, n_verts = _clip_tri_rect_with_verts(
+            vx[idx, 0],
+            vx[idx, 1],
+            vx[idx, 2],
+            vy[idx, 0],
+            vy[idx, 1],
+            vy[idx, 2],
+            xmin[idx],
+            ymin[idx],
+            xmax[idx],
+            ymax[idx],
+            out_x[idx],
+            out_y[idx],
+        )
+        areas[idx] = area
+        out_n[idx] = n_verts
+    return areas, out_x, out_y, out_n
+
+
+def _batch_clip_tri_rect_numpy_with_verts_python(
+    poly: list, xmin: float, ymin: float, xmax: float, ymax: float
+) -> Tuple[float, list]:
+    """Pure-Python Sutherland-Hodgman clip of a triangle against an
+    axis-aligned rect, returning ``(area, clipped_verts)``."""
+    edges = (
+        ("x", ">=", xmin),
+        ("x", "<=", xmax),
+        ("y", ">=", ymin),
+        ("y", "<=", ymax),
+    )
+    output = poly
+    for axis, op, ev in edges:
+        if len(output) < 3:
+            return 0.0, []
+        inp = output
+        output = []
+        for i in range(len(inp)):
+            cur = inp[i]
+            prev = inp[i - 1]
+            cc = cur[0] if axis == "x" else cur[1]
+            pc = prev[0] if axis == "x" else prev[1]
+            c_in = cc >= ev if op == ">=" else cc <= ev
+            p_in = pc >= ev if op == ">=" else pc <= ev
+            if p_in != c_in:
+                d = cc - pc
+                t = (ev - pc) / d if d != 0.0 else 0.0
+                ix = prev[0] + t * (cur[0] - prev[0])
+                iy = prev[1] + t * (cur[1] - prev[1])
+                output.append((ix, iy))
+            if c_in:
+                output.append(cur)
+    if len(output) < 3:
+        return 0.0, []
+    area = 0.0
+    n = len(output)
+    for i in range(n):
+        j = (i + 1) % n
+        area += output[i][0] * output[j][1] - output[j][0] * output[i][1]
+    return abs(area) * 0.5, output
+
+
+def _batch_clip_tri_rect_numpy_and_verts(
+    vx: np.ndarray,
+    vy: np.ndarray,
+    xmin: np.ndarray,
+    ymin: np.ndarray,
+    xmax: np.ndarray,
+    ymax: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Numpy/pure-Python fallback for :func:`_batch_clip_tri_rect_and_verts`."""
+    N = len(xmin)
+    areas = np.empty(N)
+    out_x = np.zeros((N, 8))
+    out_y = np.zeros((N, 8))
+    out_n = np.zeros(N, dtype=np.intp)
+    for k in range(N):
+        poly = [(vx[k, 0], vy[k, 0]), (vx[k, 1], vy[k, 1]), (vx[k, 2], vy[k, 2])]
+        area, out_poly = _batch_clip_tri_rect_numpy_with_verts_python(
+            poly, xmin[k], ymin[k], xmax[k], ymax[k]
+        )
+        areas[k] = area
+        m = len(out_poly)
+        out_n[k] = m
+        for p in range(m):
+            out_x[k, p] = out_poly[p][0]
+            out_y[k, p] = out_poly[p][1]
+    return areas, out_x, out_y, out_n
+
+
+def _batch_clip_areas_and_verts_tri_rect(
+    vx: np.ndarray,
+    vy: np.ndarray,
+    xmin: np.ndarray,
+    ymin: np.ndarray,
+    xmax: np.ndarray,
+    ymax: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Dispatch to the fastest available triangle-vs-rect clip back-end,
+    also returning clipped vertices (see
+    :func:`_batch_clip_areas_and_verts_nverts` for the analogous
+    N-vertex-input version)."""
+    if _HAS_NUMBA:
+        return _batch_clip_tri_rect_and_verts(
+            np.ascontiguousarray(vx),
+            np.ascontiguousarray(vy),
+            xmin,
+            ymin,
+            xmax,
+            ymax,
+        )
+    return _batch_clip_tri_rect_numpy_and_verts(vx, vy, xmin, ymin, xmax, ymax)
 
 
 # ===================================================================
@@ -1464,7 +2199,7 @@ def _batch_clip_areas_nverts(
 # `_nonseparable_transfer`), instead of building an STRtree. Two
 # back-ends for the actual clip:
 #
-# - Convex polygons (checked via `_polygons_are_convex`): bypass
+# - Convex polygons (checked via `_PolygonVertexData.convexity`): bypass
 #   Shapely entirely and use the numba-parallel (or numpy-fallback)
 #   generalized Sutherland-Hodgman clipper against the axis-aligned
 #   rectilinear cell -- same trick as `_nonseparable_transfer`, just
@@ -1477,126 +2212,139 @@ def _batch_clip_areas_nverts(
 # removes the tree-build/query overhead that dominates the
 # fully-arbitrary implementation when one side is a large regular
 # grid.
+#
+# NOTE: the TriMesh <-> RectilinearGrid combination no longer goes
+# through this function -- see `_compute_transfer_matrix_rect_trimesh`
+# below, which reuses the candidate-search helpers here but never
+# builds Shapely polygons for the mesh side.
 # ===================================================================
 
 
-def _rectilinear_grid_polygons_local_frame(
+def _rectilinear_cell_corners_world(
     center: np.ndarray,
+    angle_rad: float,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    cell_lin: NDArrayInt,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    World-frame corner coordinates of the requested rectilinear cells.
+
+    Parameters
+    ----------
+    center : ndarray, shape (2,)
+        Grid centre in world coordinates.
+    angle_rad : float
+        Grid rotation in radians.
+    x_edges, y_edges : ndarray
+        Cell boundaries in the grid's own local (unrotated) frame.
+    cell_lin : NDArrayInt, shape (n,)
+        Linear cell indices (``j * nx + i``, ``x`` fastest) to build
+        corners for. May contain duplicates.
+
+    Returns
+    -------
+    corners_x, corners_y : ndarray, shape (n, 4)
+        Counter-clockwise world-frame corners, one row per requested
+        cell.
+
+    Notes
+    -----
+    Built **on demand for the requested cells only**. An earlier
+    revision materialized the full ``(nx * ny, 4)`` corner arrays for
+    the entire grid up front, even though the convex fast path never
+    reads them (it clips in the grid's local frame, where a cell's
+    extent is just two edge lookups) -- so for an all-convex polygon
+    grid the whole allocation was pure waste, and for a mixed one only
+    the non-convex candidates need it.
+    """
+    ca, sa = np.cos(angle_rad), np.sin(angle_rad)
+    nx = len(x_edges) - 1
+    cell_j, cell_i = np.divmod(cell_lin, nx)
+
+    x0 = x_edges[cell_i]
+    x1 = x_edges[cell_i + 1]
+    y0 = y_edges[cell_j]
+    y1 = y_edges[cell_j + 1]
+
+    local_cx = np.stack([x0, x1, x1, x0], axis=-1)
+    local_cy = np.stack([y0, y0, y1, y1], axis=-1)
+
+    corners_x = center[0] + local_cx * ca - local_cy * sa
+    corners_y = center[1] + local_cx * sa + local_cy * ca
+    return corners_x, corners_y
+
+
+def _rectilinear_local_frame_params(
     dx: float,
     dy: float,
     nx: int,
     ny: int,
     angle_deg: float,
-) -> Tuple[np.ndarray, np.ndarray, float, float, Tuple[np.ndarray, np.ndarray]]:
+) -> Tuple[float, float, Tuple[np.ndarray, np.ndarray]]:
     """
-    Return per-cell world-frame polygon corner coordinates for a
-    rectilinear grid, plus the local-frame edge vectors needed for the
-    world -> local transform.
+    Cheap scalar/edge description of a rectilinear grid.
 
     Returns
     -------
-    corners_x, corners_y : ndarray, shape (n_cells, 4)
-        World-frame coordinates of the 4 corners of each cell, ordered
-        counter-clockwise, cell linear index = j * nx + i (x fastest).
     angle_rad : float
         Grid rotation in radians.
     cell_area : float
         Area of a single cell (``dx * dy``).
     edges_local : tuple(ndarray, ndarray)
-        ``(x_edges, y_edges)`` 1-D arrays of length ``nx + 1`` / ``ny + 1``
-        giving cell boundaries in the grid's own local (unrotated) frame.
+        ``(x_edges, y_edges)`` 1-D arrays of length ``nx + 1`` /
+        ``ny + 1`` giving cell boundaries in the grid's own local
+        (unrotated) frame.
     """
-    angle_rad = np.deg2rad(angle_deg)
-    ca, sa = np.cos(angle_rad), np.sin(angle_rad)
-
-    x_edges = (np.arange(nx + 1) - nx / 2) * dx
-    y_edges = (np.arange(ny + 1) - ny / 2) * dy
-
-    x0 = x_edges[:-1][:, None]
-    x1 = x_edges[1:][:, None]
-    y0 = y_edges[:-1][None, :]
-    y1 = y_edges[1:][None, :]
-
-    # local-frame corners per cell, shape (nx, ny, 4)
-    local_cx = np.stack(
-        [
-            np.broadcast_to(x0, (nx, ny)),
-            np.broadcast_to(x1, (nx, ny)),
-            np.broadcast_to(x1, (nx, ny)),
-            np.broadcast_to(x0, (nx, ny)),
-        ],
-        axis=-1,
-    )
-    local_cy = np.stack(
-        [
-            np.broadcast_to(y0, (nx, ny)),
-            np.broadcast_to(y0, (nx, ny)),
-            np.broadcast_to(y1, (nx, ny)),
-            np.broadcast_to(y1, (nx, ny)),
-        ],
-        axis=-1,
+    return (
+        np.deg2rad(angle_deg),
+        dx * dy,
+        (
+            (np.arange(nx + 1) - nx / 2) * dx,
+            (np.arange(ny + 1) - ny / 2) * dy,
+        ),
     )
 
-    world_cx = center[0] + local_cx * ca - local_cy * sa
-    world_cy = center[1] + local_cx * sa + local_cy * ca
 
-    # flatten with x fastest: linear index = j * nx + i.
-    # world_cx/world_cy have shape (nx, ny, 4); a plain C-order reshape
-    # would group by i first (index = i * ny + j), so transpose to
-    # (ny, nx, 4) before flattening to get j * nx + i as required.
-    corners_x = world_cx.transpose(1, 0, 2).reshape(nx * ny, 4)
-    corners_y = world_cy.transpose(1, 0, 2).reshape(nx * ny, 4)
-
-    return corners_x, corners_y, angle_rad, dx * dy, (x_edges, y_edges)
-
-
-def _polygon_candidate_ranges_in_rectilinear_grid(
-    poly_x: np.ndarray,
-    poly_y: np.ndarray,
-    poly_slices: list,
-    grid_center: np.ndarray,
-    grid_angle_rad: float,
+def _bbox_candidate_ranges_in_rectilinear_grid(
+    bbox_xmin: np.ndarray,
+    bbox_xmax: np.ndarray,
+    bbox_ymin: np.ndarray,
+    bbox_ymax: np.ndarray,
     x_edges: np.ndarray,
     y_edges: np.ndarray,
     nx: int,
     ny: int,
 ) -> Tuple[NDArrayInt, NDArrayInt, NDArrayInt]:
     """
-    For each polygon (given by concatenated world-frame vertex arrays
-    ``poly_x``/``poly_y`` and per-polygon ``poly_slices`` = list of
-    ``(start, stop)`` index pairs), compute the axis-aligned bounding
-    box of its vertices in the rectilinear grid's local frame, and
-    convert that bbox directly into a rectangular range of candidate
-    cell indices ``[i_lo, i_hi] x [j_lo, j_hi]`` via O(1) arithmetic
-    (no spatial index).
+    Core O(1)-per-item candidate-range arithmetic shared by every
+    "rectilinear vs many small shapes" path in this module: given, for
+    each of ``n_items`` shapes, its axis-aligned bounding box already
+    expressed in the rectilinear grid's own *local* (unrotated) frame,
+    return the flattened list of ``(item_idx, cell_i, cell_j)``
+    candidate triples covering every grid cell whose axis-aligned
+    extent overlaps that bbox.
+
+    This is a pure index-arithmetic routine -- no geometry, no Shapely,
+    no per-item Python loop -- and is reused both by the generic
+    rectilinear/polygon path (:func:`_compute_transfer_matrix_mixed`,
+    which gets its bboxes from
+    :meth:`_PolygonVertexData.local_frame_bboxes`) and
+    by the dedicated rectilinear/TriMesh path
+    (:func:`_compute_transfer_matrix_rect_trimesh`, which computes the
+    bboxes directly from the ``(n_tri, 3)`` triangle vertex arrays via
+    plain numpy ``min``/``max`` reductions).
 
     Returns
     -------
-    poly_idx, cell_i, cell_j : NDArrayInt
-        Flattened arrays such that for entry ``k``, polygon
-        ``poly_idx[k]`` has candidate source cell ``(cell_i[k],
-        cell_j[k])``.
+    item_idx, cell_i, cell_j : NDArrayInt
+        Flattened arrays such that for entry ``k``, item ``item_idx[k]``
+        has candidate grid cell ``(cell_i[k], cell_j[k])``.
     """
-    ca, sa = np.cos(grid_angle_rad), np.sin(grid_angle_rad)
-
-    n_poly = len(poly_slices)
-
-    dxw = poly_x - grid_center[0]
-    dyw = poly_y - grid_center[1]
-    local_x = dxw * ca + dyw * sa
-    local_y = -dxw * sa + dyw * ca
-
-    # Vectorised per-polygon bbox via a segment-id array and
-    # np.minimum.reduceat / np.maximum.reduceat (avoids a Python loop
-    # over polygons). ``starts`` gives the reduceat boundaries; all
-    # slices are assumed contiguous and non-empty (guaranteed by the
-    # caller, which builds them from polygon exterior coordinate
-    # counts).
-    starts = np.fromiter((s for s, _ in poly_slices), dtype=np.intp, count=n_poly)
-    bbox_xmin = np.minimum.reduceat(local_x, starts)
-    bbox_xmax = np.maximum.reduceat(local_x, starts)
-    bbox_ymin = np.minimum.reduceat(local_y, starts)
-    bbox_ymax = np.maximum.reduceat(local_y, starts)
+    n_items = len(bbox_xmin)
+    if n_items == 0:
+        _e = np.empty(0, dtype=np.intp)
+        return _e, _e, _e
 
     x0, y0 = x_edges[0], y_edges[0]
     dx = x_edges[1] - x_edges[0] if nx > 0 else 1.0
@@ -1623,8 +2371,8 @@ def _polygon_candidate_ranges_in_rectilinear_grid(
         _e = np.empty(0, dtype=np.intp)
         return _e, _e, _e
 
-    poly_idx = np.repeat(np.arange(n_poly, dtype=np.intp), counts)
-    cum = np.empty(n_poly + 1, dtype=np.intp)
+    item_idx = np.repeat(np.arange(n_items, dtype=np.intp), counts)
+    cum = np.empty(n_items + 1, dtype=np.intp)
     cum[0] = 0
     np.cumsum(counts, out=cum[1:])
     local_pos = np.arange(total, dtype=np.intp) - np.repeat(cum[:-1], counts)
@@ -1633,7 +2381,7 @@ def _polygon_candidate_ranges_in_rectilinear_grid(
     cell_i = np.repeat(i_lo, counts) + local_pos // rep_nj
     cell_j = np.repeat(j_lo, counts) + local_pos % rep_nj
 
-    return poly_idx, cell_i, cell_j
+    return item_idx, cell_i, cell_j
 
 
 def _compute_transfer_matrix_mixed(
@@ -1643,7 +2391,9 @@ def _compute_transfer_matrix_mixed(
     rectilinear_grid_mask: Optional[NDArrayBool] = None,
     polygon_grid_mask: Optional[NDArrayBool] = None,
     is_sanity_check: bool = False,
-) -> Tuple[csc_array, NDArrayInt, NDArrayInt, shapely.MultiPolygon]:
+    with_intersections: bool = True,
+    polygon_grid_is_convex: bool = False,
+) -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
     """
     Conservative transfer matrix between one rectilinear grid and one
     arbitrary polygon grid.
@@ -1677,6 +2427,15 @@ def _compute_transfer_matrix_mixed(
     is_sanity_check : bool
         If True, verify conservation for fully-covered, unmasked
         source cells.
+    polygon_grid_is_convex : bool, optional
+        If ``True``, skip the ``_PolygonVertexData.convexity`` test entirely
+        and treat every polygon in ``polygon_grid`` as convex. By
+        default ``False``, meaning convexity is detected automatically.
+        (The TriMesh case that used to set this flag now goes through
+        the dedicated :func:`_compute_transfer_matrix_rect_trimesh`
+        path instead, which needs no Shapely polygons at all for the
+        mesh side; this flag remains for any other caller that already
+        knows its polygons are convex.)
 
     Returns
     -------
@@ -1684,7 +2443,7 @@ def _compute_transfer_matrix_mixed(
         Sparse conservative transfer matrix ``W[i, j] = |S_i ∩ T_j| / |S_i|``.
     source_indices, target_indices : NDArrayInt, shape (nnz,)
         Row / column index of each nonzero entry.
-    intersections : shapely.MultiPolygon
+    intersections : IntersectionsArray, shape (nnz,)
         Intersection geometries for each nonzero entry (parallel to
         ``source_indices`` / ``target_indices``). Entries produced by
         the fast convex-clip path are returned as ``None``
@@ -1694,11 +2453,8 @@ def _compute_transfer_matrix_mixed(
     rectilinear_center = np.asarray(
         (rectilinear_grid.cx, rectilinear_grid.cy), dtype=float
     )
-    rectilinear_dx = rectilinear_grid.dx
-    rectilinear_dy = rectilinear_grid.dy
     rectilinear_nx = rectilinear_grid.nx
     rectilinear_ny = rectilinear_grid.ny
-    rectilinear_angle_deg = rectilinear_grid.theta
 
     n_rect = rectilinear_nx * rectilinear_ny
     n_poly = len(polygon_grid.geoms)
@@ -1708,59 +2464,46 @@ def _compute_transfer_matrix_mixed(
     )
     polygon_grid_mask = _validate_mask(polygon_grid_mask, n_poly, "polygon grid mask")
 
-    (
-        rect_corners_x,
-        rect_corners_y,
-        rect_angle_rad,
-        rect_cell_area,
-        (x_edges, y_edges),
-    ) = _rectilinear_grid_polygons_local_frame(
-        rectilinear_center,
-        rectilinear_dx,
-        rectilinear_dy,
-        rectilinear_nx,
-        rectilinear_ny,
-        rectilinear_angle_deg,
+    rect_angle_rad, rect_cell_area, (x_edges, y_edges) = (
+        _rectilinear_local_frame_params(
+            rectilinear_grid.dx,
+            rectilinear_grid.dy,
+            rectilinear_nx,
+            rectilinear_ny,
+            rectilinear_grid.theta,
+        )
     )
 
     poly_polygons: np.ndarray = np.asarray(polygon_grid.geoms, dtype=object)
 
-    def _empty_result() -> Tuple[
-        csc_array, NDArrayInt, NDArrayInt, shapely.MultiPolygon
-    ]:
-        n_source = n_rect if rectilinear_is_source else n_poly
-        n_target = n_poly if rectilinear_is_source else n_rect
+    n_source = n_rect if rectilinear_is_source else n_poly
+    n_target = n_poly if rectilinear_is_source else n_rect
+
+    def _empty_result() -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
         empty = csc_array((n_source, n_target))
         _e = np.empty(0, dtype=np.intp)
-        return empty, _e, _e, shapely.MultiPolygon([])
+        return empty, _e, _e, _no_intersections()
 
-    # Flatten polygon exterior coordinates once for the vectorised
-    # local-frame bbox computation (works for simple, possibly
-    # non-convex polygons; holes are ignored for the bbox candidate
-    # search, which is conservative -- it can only *over*-include
-    # candidates, never miss one, since Shapely still performs the
-    # exact clip afterwards). Uses shapely's own coordinate extraction
-    # (no per-polygon Python loop).
-    if n_poly > 0:
-        exteriors = shapely.get_exterior_ring(poly_polygons)
-        coords, coord_poly_idx = shapely.get_coordinates(exteriors, return_index=True)
-        poly_x = coords[:, 0]
-        poly_y = coords[:, 1]
-        # coord_poly_idx is sorted, non-decreasing: build (start, stop)
-        # slice boundaries per polygon via searchsorted.
-        boundaries = np.searchsorted(coord_poly_idx, np.arange(n_poly + 1), side="left")
-        poly_slices = list(zip(boundaries[:-1], boundaries[1:]))
-    else:
-        poly_x = np.empty(0)
-        poly_y = np.empty(0)
-        poly_slices = []
+    if n_rect == 0 or n_poly == 0:
+        return _empty_result()
 
-    poly_idx, cell_i, cell_j = _polygon_candidate_ranges_in_rectilinear_grid(
-        poly_x,
-        poly_y,
-        poly_slices,
-        rectilinear_center,
-        rect_angle_rad,
+    # Single GEOS extraction of every polygon's exterior ring, reused
+    # below for the candidate bbox search, the convexity test and the
+    # padded clip buffers (see `_PolygonVertexData`).
+    poly_data = _PolygonVertexData(poly_polygons)
+
+    # Per-polygon bboxes in the rectilinear grid's local frame. Holes
+    # are ignored here, which is conservative for a candidate search --
+    # it can only *over*-include candidates, never miss one.
+    poly_bbox_xmin, poly_bbox_xmax, poly_bbox_ymin, poly_bbox_ymax = (
+        poly_data.local_frame_bboxes(rectilinear_center, rect_angle_rad)
+    )
+
+    poly_idx, cell_i, cell_j = _bbox_candidate_ranges_in_rectilinear_grid(
+        poly_bbox_xmin,
+        poly_bbox_xmax,
+        poly_bbox_ymin,
+        poly_bbox_ymax,
         x_edges,
         y_edges,
         rectilinear_nx,
@@ -1784,24 +2527,33 @@ def _compute_transfer_matrix_mixed(
         if len(poly_idx) == 0:
             return _empty_result()
 
-    # -- bbox pre-filter (cheap, avoids paying for exact clip on
-    #    sliver/edge-touch candidates) --
-    rect_xmin = rect_corners_x[rect_lin].min(axis=1)
-    rect_xmax = rect_corners_x[rect_lin].max(axis=1)
-    rect_ymin = rect_corners_y[rect_lin].min(axis=1)
-    rect_ymax = rect_corners_y[rect_lin].max(axis=1)
+    # -- bbox pre-filter (cheap, avoids paying for the exact clip on
+    #    sliver/edge-touch candidates). Done entirely in the grid's
+    #    local frame: a cell's extent is then just two edge lookups,
+    #    and the polygon bboxes were already computed above -- so this
+    #    needs neither a `shapely.bounds` call on the (duplicate-laden)
+    #    candidate array nor a gather-and-reduce over world-frame
+    #    corners, both of which an earlier revision performed here. --
+    cell_j_all, cell_i_all = np.divmod(rect_lin, rectilinear_nx)
+    cell_xmin = x_edges[cell_i_all]
+    cell_xmax = x_edges[cell_i_all + 1]
+    cell_ymin = y_edges[cell_j_all]
+    cell_ymax = y_edges[cell_j_all + 1]
 
-    poly_bounds = shapely.bounds(poly_polygons[poly_idx])
-    bbox_dx = np.minimum(rect_xmax, poly_bounds[:, 2]) - np.maximum(
-        rect_xmin, poly_bounds[:, 0]
+    bbox_dx = np.minimum(cell_xmax, poly_bbox_xmax[poly_idx]) - np.maximum(
+        cell_xmin, poly_bbox_xmin[poly_idx]
     )
-    bbox_dy = np.minimum(rect_ymax, poly_bounds[:, 3]) - np.maximum(
-        rect_ymin, poly_bounds[:, 1]
+    bbox_dy = np.minimum(cell_ymax, poly_bbox_ymax[poly_idx]) - np.maximum(
+        cell_ymin, poly_bbox_ymin[poly_idx]
     )
     nontrivial = (bbox_dx > 1e-15) & (bbox_dy > 1e-15)
 
     poly_idx = poly_idx[nontrivial]
     rect_lin = rect_lin[nontrivial]
+    cell_xmin = cell_xmin[nontrivial]
+    cell_xmax = cell_xmax[nontrivial]
+    cell_ymin = cell_ymin[nontrivial]
+    cell_ymax = cell_ymax[nontrivial]
 
     if len(poly_idx) == 0:
         return _empty_result()
@@ -1810,8 +2562,10 @@ def _compute_transfer_matrix_mixed(
     #    convex polygons bypass Shapely via the numba/numpy N-vertex
     #    Sutherland-Hodgman clipper; non-convex / holed polygons fall
     #    back to the exact Shapely clip. --
-    is_convex_per_poly = _polygons_are_convex(poly_polygons)
-    candidate_is_convex = is_convex_per_poly[poly_idx]
+    if polygon_grid_is_convex:
+        candidate_is_convex = np.ones(len(poly_idx), dtype=bool)
+    else:
+        candidate_is_convex = poly_data.convexity()[poly_idx]
 
     rect_lin_cvx = rect_lin[candidate_is_convex]
     poly_idx_cvx = poly_idx[candidate_is_convex]
@@ -1825,108 +2579,68 @@ def _compute_transfer_matrix_mixed(
 
     # -- fast path: convex polygons, numba/numpy N-vertex SH clip --
     #
-    # IMPORTANT: `_clip_area_single_nverts` assumes an axis-aligned
-    # clip rectangle. The rectilinear grid's cells are only
-    # axis-aligned in the grid's own *local* frame (they are rotated
-    # in world coordinates whenever `rectilinear_angle_deg != 0`), so
-    # both the polygon vertices and the clip rectangle bounds must be
-    # expressed in that local frame here -- we cannot reuse the
-    # world-frame `rect_corners_x/y` used by the Shapely branch.
+    # IMPORTANT: `_clip_nverts_with_verts` assumes an axis-aligned clip
+    # rectangle. The rectilinear grid's cells are only axis-aligned in
+    # the grid's own *local* frame (they are rotated in world
+    # coordinates whenever the grid angle is nonzero), so both the
+    # polygon vertices and the clip bounds are expressed in that local
+    # frame here.
     if len(poly_idx_cvx) > 0:
-        exteriors_cvx = shapely.get_exterior_ring(poly_polygons[poly_idx_cvx])
-        coords_cvx, coord_local_idx = shapely.get_coordinates(
-            exteriors_cvx, return_index=True
+        max_verts = poly_data.max_verts
+        clip_width = _clip_buffer_width(max_verts, n_clip_edges=4)
+
+        # Padded buffers are built once **per polygon** and then gathered
+        # by candidate. An earlier revision instead ran
+        # `get_exterior_ring` + `get_coordinates` on `poly_polygons[
+        # poly_idx_cvx]` -- an array holding one entry per *candidate
+        # pair*, so a polygon overlapping nine cells was re-extracted
+        # from GEOS nine times.
+        vx_all, vy_all = poly_data.padded_vertex_buffers(
+            clip_width, local_to_grid=(rectilinear_center, rect_angle_rad)
         )
-        # world -> rectilinear-grid-local transform (inverse rotation)
-        rc_ca, rc_sa = np.cos(rect_angle_rad), np.sin(rect_angle_rad)
-        dxw = coords_cvx[:, 0] - rectilinear_center[0]
-        dyw = coords_cvx[:, 1] - rectilinear_center[1]
-        coords_cvx_local = np.column_stack(
-            [dxw * rc_ca + dyw * rc_sa, -dxw * rc_sa + dyw * rc_ca]
-        )
 
-        n_cand = len(poly_idx_cvx)
-        counts_cvx = np.bincount(coord_local_idx, minlength=n_cand)
-        # shapely rings repeat the first vertex at the end; drop it
-        # per-candidate so `n_verts` reflects the true vertex count.
-        counts_cvx = counts_cvx - 1
-        max_verts = int(counts_cvx.max()) if n_cand > 0 else 0
-
-        if max_verts + 4 > _MAX_CLIP_VERTS:
-            raise ValueError(
-                f"Polygon with {max_verts} vertices exceeds the "
-                f"_MAX_CLIP_VERTS={_MAX_CLIP_VERTS} buffer capacity of "
-                "the fast convex-clip path (needs max_verts + 4 slots "
-                "for Sutherland-Hodgman output growth). Increase "
-                "_MAX_CLIP_VERTS or exclude this polygon from the "
-                "convex fast path."
-            )
-
-        boundaries_cvx = np.searchsorted(
-            coord_local_idx, np.arange(n_cand + 1), side="left"
-        )
-        starts_cvx = boundaries_cvx[:-1]
-
-        # Vectorised scatter of each candidate's (non-closing) vertices
-        # into fixed-size padded buffers, replacing a Python loop over
-        # candidates. For point at global coordinate index k belonging
-        # to candidate c (via coord_local_idx), its local column in
-        # the padded buffer is (k - starts_cvx[c]); only points with
-        # local column < counts_cvx[c] are kept (drops the duplicated
-        # closing vertex, which always lands at local column ==
-        # counts_cvx[c]).
-        point_cand_idx = coord_local_idx
-        point_local_col = np.arange(len(coords_cvx_local)) - starts_cvx[point_cand_idx]
-        keep = point_local_col < counts_cvx[point_cand_idx]
-
-        vx_padded = np.zeros((n_cand, _MAX_CLIP_VERTS))
-        vy_padded = np.zeros((n_cand, _MAX_CLIP_VERTS))
-        vx_padded[point_cand_idx[keep], point_local_col[keep]] = coords_cvx_local[
-            keep, 0
-        ]
-        vy_padded[point_cand_idx[keep], point_local_col[keep]] = coords_cvx_local[
-            keep, 1
-        ]
-
-        # cell (i, j) from rect_lin_cvx = j * nx + i (Fortran order,
-        # matching `_rectilinear_grid_polygons_local_frame`).
-        cell_j_cvx, cell_i_cvx = np.divmod(rect_lin_cvx, rectilinear_nx)
-        cell_xmin = x_edges[cell_i_cvx]
-        cell_xmax = x_edges[cell_i_cvx + 1]
-        cell_ymin = y_edges[cell_j_cvx]
-        cell_ymax = y_edges[cell_j_cvx + 1]
-
-        areas_cvx = _batch_clip_areas_nverts(
-            np.ascontiguousarray(vx_padded),
-            np.ascontiguousarray(vy_padded),
-            counts_cvx.astype(np.intp),
-            cell_xmin,
-            cell_ymin,
-            cell_xmax,
-            cell_ymax,
+        areas_cvx, out_x_cvx, out_y_cvx, out_n_cvx = _batch_clip_areas_and_verts_nverts(
+            np.ascontiguousarray(vx_all[poly_idx_cvx]),
+            np.ascontiguousarray(vy_all[poly_idx_cvx]),
+            poly_data.true_n[poly_idx_cvx].astype(np.intp),
+            cell_xmin[candidate_is_convex],
+            cell_ymin[candidate_is_convex],
+            cell_xmax[candidate_is_convex],
+            cell_ymax[candidate_is_convex],
         )
 
         valid_cvx = areas_cvx > 1e-15
         result_rect_lin_parts.append(rect_lin_cvx[valid_cvx])
         result_poly_idx_parts.append(poly_idx_cvx[valid_cvx])
         result_areas_parts.append(areas_cvx[valid_cvx])
-        # Intersection geometries are not computed on the fast path
-        # (area-only clipper); returned as None placeholders so the
-        # combined `intersections` output stays index-aligned. Callers
-        # needing exact intersection geometry for the convex fast path
-        # can still get it from Shapely on request, but computing it
-        # by default here would defeat the purpose of bypassing GEOS.
-        result_intersections_parts.append(
-            np.full(int(valid_cvx.sum()), None, dtype=object)
-        )
+        if with_intersections:
+            # Geometry is built from the same clipped vertices the area
+            # computation already produced (vectorized `shapely.polygons`
+            # construction -- no GEOS clipping call). Those vertices are
+            # in the grid's local frame, so they are rotated back to
+            # world coordinates to match the Shapely-exact branch below.
+            result_intersections_parts.append(
+                _polygons_from_padded_verts(
+                    out_x_cvx[valid_cvx],
+                    out_y_cvx[valid_cvx],
+                    out_n_cvx[valid_cvx],
+                    local_to_world=(
+                        rectilinear_center,
+                        np.cos(rect_angle_rad),
+                        np.sin(rect_angle_rad),
+                    ),
+                )
+            )
 
     # -- general path: non-convex / holed polygons, exact Shapely clip --
     if len(poly_idx_gen) > 0:
+        # World-frame cell corners are built here only, for the cells
+        # that actually reach the Shapely branch.
+        gen_corners_x, gen_corners_y = _rectilinear_cell_corners_world(
+            rectilinear_center, rect_angle_rad, x_edges, y_edges, rect_lin_gen
+        )
         rect_polys_gen = shapely.polygons(
-            np.stack(
-                [rect_corners_x[rect_lin_gen], rect_corners_y[rect_lin_gen]],
-                axis=-1,
-            )
+            np.stack([gen_corners_x, gen_corners_y], axis=-1)
         )
         intersections_gen = shapely.intersection(
             rect_polys_gen, poly_polygons[poly_idx_gen]
@@ -1936,12 +2650,12 @@ def _compute_transfer_matrix_mixed(
         result_rect_lin_parts.append(rect_lin_gen[valid_gen])
         result_poly_idx_parts.append(poly_idx_gen[valid_gen])
         result_areas_parts.append(areas_gen[valid_gen])
-        result_intersections_parts.append(intersections_gen[valid_gen])
+        if with_intersections:
+            result_intersections_parts.append(intersections_gen[valid_gen])
 
     rect_lin = np.concatenate(result_rect_lin_parts)
     poly_idx = np.concatenate(result_poly_idx_parts)
     intersection_areas = np.concatenate(result_areas_parts)
-    intersections = np.concatenate(result_intersections_parts)
 
     # Redundant safety net: both branches above already filter on
     # area > 1e-15 individually, but re-applying here guards against
@@ -1950,20 +2664,930 @@ def _compute_transfer_matrix_mixed(
     rect_lin = rect_lin[valid]
     poly_idx = poly_idx[valid]
     intersection_areas = intersection_areas[valid]
-    intersections = intersections[valid]
 
-    rect_cell_areas = np.full(n_rect, rect_cell_area)
+    if with_intersections:
+        intersections = np.concatenate(result_intersections_parts)[valid]
+    else:
+        intersections = _no_intersections()
 
     if rectilinear_is_source:
         source_indices = rect_lin
         target_indices = poly_idx
-        source_areas = rect_cell_areas
-        n_source, n_target = n_rect, n_poly
+        # every rectilinear cell has the same area, so divide by the
+        # scalar rather than materializing and gathering an n_rect array
+        weights = intersection_areas / rect_cell_area
     else:
         source_indices = poly_idx
         target_indices = rect_lin
-        source_areas = shapely.area(poly_polygons)
-        n_source, n_target = n_poly, n_rect
+        weights = intersection_areas / shapely.area(poly_polygons)[source_indices]
+
+    mat = coo_array(
+        (weights, (source_indices, target_indices)),
+        shape=(n_source, n_target),
+    ).tocsc()
+
+    if is_sanity_check:
+        _check_conservation(mat)
+
+    return (
+        mat,
+        source_indices,
+        target_indices,
+        _pack_intersections(intersections) if with_intersections else intersections,
+    )
+
+
+# ===================================================================
+# TriMesh helpers
+# ===================================================================
+
+
+def _tri_world_coords(mesh: TriMesh) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Per-triangle vertex world coordinates, each of shape ``(n_tri, 3)``.
+
+    This reads directly off ``mesh.verts_xy`` / ``mesh.tri_verts`` --
+    it never materializes Shapely ``Polygon`` objects, which is the
+    whole point of the dedicated TriMesh fast paths in this module
+    (building ``n_tri`` Shapely polygons and re-extracting their
+    coordinates later would be strictly more expensive than a single
+    fancy-index gather here).
+    """
+    tv = mesh.tri_verts
+    vx = mesh.verts_xy[:, 0]
+    vy = mesh.verts_xy[:, 1]
+    return vx[tv], vy[tv]  # each (n_tri, 3)
+
+
+def _ensure_ccw_triangles(
+    tx: np.ndarray, ty: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Return a copy of ``(tx, ty)`` (each shape ``(n_tri, 3)``) with every
+    triangle's vertices re-ordered to counter-clockwise winding.
+
+    The triangle-triangle and convex-vs-convex clip kernels below
+    assume CCW input for both the subject and the clip polygon (the
+    inside/outside half-plane test is ``cross(edge, point - edge0) >=
+    0``, which flips sign under CW winding). A ``TriMesh`` does not
+    itself guarantee a winding convention, so this normalization is
+    applied once per mesh (vectorized, O(n_tri)) rather than re-checked
+    per candidate pair inside the numba kernels.
+
+    Note the rectilinear/TriMesh dedicated path below does NOT need
+    CCW-normalized triangles: `_clip_tri_rect_with_verts` (like every
+    kernel that clips against an axis-aligned rectangle) only tests
+    each vertex against fixed axis thresholds and applies
+    ``abs(...)`` to the final shoelace sum, so it is winding-agnostic
+    and works correctly for either CW or CCW input. This normalization
+    is therefore only invoked on the TriMesh-vs-TriMesh and
+    TriMesh-vs-arbitrary-polygon paths, where the clip *window* itself
+    is a triangle and winding direction matters for the half-plane
+    inside/outside test.
+    """
+    signed_area2 = (tx[:, 1] - tx[:, 0]) * (ty[:, 2] - ty[:, 0]) - (
+        tx[:, 2] - tx[:, 0]
+    ) * (ty[:, 1] - ty[:, 0])
+    is_cw = signed_area2 < 0.0
+    if not is_cw.any():
+        return tx, ty
+    tx = tx.copy()
+    ty = ty.copy()
+    tx[is_cw, 1], tx[is_cw, 2] = tx[is_cw, 2], tx[is_cw, 1].copy()
+    ty[is_cw, 1], ty[is_cw, 2] = ty[is_cw, 2], ty[is_cw, 1].copy()
+    return tx, ty
+
+
+# ===================================================================
+# Dedicated RectilinearGrid vs TriMesh path (Shapely-free)
+#
+# This is the key optimization over routing TriMesh through the
+# generic rectilinear/polygon mixed path: it never calls
+# `TriMesh.to_shapely()`, never builds `n_tri` Shapely `Polygon`
+# objects, and never re-extracts their coordinates via
+# `get_exterior_ring` / `get_coordinates`. Every step operates directly
+# on the `(n_tri, 3)` vertex arrays already available from
+# `mesh.verts_xy[mesh.tri_verts]`:
+#
+#   1. Candidate-pair search: per-triangle bounding boxes come from a
+#      vectorised `.min(axis=1)` / `.max(axis=1)` over the local-frame
+#      vertex arrays (no `shapely.bounds`), then reuse the same O(1)
+#      index-range arithmetic (`_bbox_candidate_ranges_in_rectilinear_grid`)
+#      as the generic mixed path.
+#   2. Per-candidate padded vertex buffers: since every triangle has
+#      exactly 3 vertices, there is no ragged bookkeeping at all (no
+#      `get_coordinates`/`searchsorted`/`bincount` dance) -- candidates
+#      are just a `(n_cand, 3)` fancy-index gather from the mesh's own
+#      local-frame vertex arrays.
+#   3. Clip: a specialized 3-vertex-input Sutherland-Hodgman kernel
+#      (`_batch_clip_areas_and_verts_tri_rect`) avoids even the generic
+#      N-vertex padding used by `_batch_clip_areas_and_verts_nverts`.
+#   4. No convexity test: a triangle is always convex, so there is no
+#      Shapely fallback branch on this path at all.
+# ===================================================================
+
+
+def _compute_transfer_matrix_rect_trimesh(
+    rectilinear_grid: RectilinearGrid,
+    trimesh: TriMesh,
+    rectilinear_is_source: bool,
+    rectilinear_grid_mask: Optional[NDArrayBool] = None,
+    trimesh_mask: Optional[NDArrayBool] = None,
+    is_sanity_check: bool = False,
+    with_intersections: bool = True,
+) -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
+    """
+    Conservative transfer matrix between a rectilinear grid and a
+    triangular mesh, without ever constructing a Shapely geometry for
+    the mesh side.
+
+    Parameters
+    ----------
+    rectilinear_grid : RectilinearGrid
+        Grid object exposing ``cx, cy, dx, dy, nx, ny, theta``.
+    trimesh : TriMesh
+        Triangular mesh, the other side of the transfer.
+    rectilinear_is_source : bool
+        If True, the rectilinear grid is the source and ``trimesh`` is
+        the target. If False, the roles are reversed.
+    rectilinear_grid_mask : 1-D array of bool, optional
+        Boolean mask over the rectilinear grid's cells (Fortran-order
+        linear index ``j * nx + i``), length ``nx * ny``. If ``None``,
+        all cells are considered.
+    trimesh_mask : 1-D array of bool, optional
+        Boolean mask over ``trimesh`` triangles (length
+        ``trimesh.n_tri``). If ``None``, all triangles are considered.
+    is_sanity_check : bool, optional
+        If True, verify conservation for fully-covered, unmasked
+        source cells.
+
+    Returns
+    -------
+    W : csc_array, shape (n_source, n_target)
+        Sparse conservative transfer matrix.
+    source_indices, target_indices : NDArrayInt, shape (nnz,)
+        Row / column index of each nonzero entry.
+    intersections : IntersectionsArray, shape (nnz,)
+        One intersection ``Polygon`` per nonzero matrix entry, built
+        via :func:`_polygons_from_padded_verts` from the same clipped
+        vertices the area computation already produced -- no GEOS
+        clipping call, only vectorized ``shapely.polygons``
+        construction. This is still a fully Shapely-clip-free path for
+        the mesh side; only the final geometry *construction* touches
+        ``shapely`` (via its vectorized ``polygons`` constructor).
+    """
+    rectilinear_center = np.asarray(
+        (rectilinear_grid.cx, rectilinear_grid.cy), dtype=float
+    )
+    rectilinear_dx = rectilinear_grid.dx
+    rectilinear_dy = rectilinear_grid.dy
+    rectilinear_nx = rectilinear_grid.nx
+    rectilinear_ny = rectilinear_grid.ny
+    rectilinear_angle_deg = rectilinear_grid.theta
+
+    n_rect = rectilinear_nx * rectilinear_ny
+    n_tri = trimesh.n_tri
+
+    rectilinear_grid_mask = _validate_mask(
+        rectilinear_grid_mask, n_rect, "rectilinear grid mask"
+    )
+    trimesh_mask = _validate_mask(trimesh_mask, n_tri, "trimesh mask")
+
+    n_source = n_rect if rectilinear_is_source else n_tri
+    n_target = n_tri if rectilinear_is_source else n_rect
+
+    def _empty_result() -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
+        empty = csc_array((n_source, n_target))
+        _e = np.empty(0, dtype=np.intp)
+        return empty, _e, _e, _no_intersections()
+
+    if n_rect == 0 or n_tri == 0:
+        return _empty_result()
+
+    rect_angle_rad = np.deg2rad(rectilinear_angle_deg)
+    rc_ca, rc_sa = np.cos(rect_angle_rad), np.sin(rect_angle_rad)
+
+    x_edges = (np.arange(rectilinear_nx + 1) - rectilinear_nx / 2) * rectilinear_dx
+    y_edges = (np.arange(rectilinear_ny + 1) - rectilinear_ny / 2) * rectilinear_dy
+    rect_cell_area = rectilinear_dx * rectilinear_dy
+
+    # -- triangle vertices, world frame -> rectilinear-grid-local frame,
+    #    entirely in numpy (no Shapely object ever built) --
+    tri_wx, tri_wy = _tri_world_coords(trimesh)  # each (n_tri, 3)
+    dxw = tri_wx - rectilinear_center[0]
+    dyw = tri_wy - rectilinear_center[1]
+    tri_lx = dxw * rc_ca + dyw * rc_sa
+    tri_ly = -dxw * rc_sa + dyw * rc_ca
+
+    # -- per-triangle bbox via plain numpy reductions (no shapely.bounds) --
+    tri_bbox_xmin = tri_lx.min(axis=1)
+    tri_bbox_xmax = tri_lx.max(axis=1)
+    tri_bbox_ymin = tri_ly.min(axis=1)
+    tri_bbox_ymax = tri_ly.max(axis=1)
+
+    # -- candidate cell ranges via shared O(1) arithmetic --
+    tri_idx, cell_i, cell_j = _bbox_candidate_ranges_in_rectilinear_grid(
+        tri_bbox_xmin,
+        tri_bbox_xmax,
+        tri_bbox_ymin,
+        tri_bbox_ymax,
+        x_edges,
+        y_edges,
+        rectilinear_nx,
+        rectilinear_ny,
+    )
+
+    if len(tri_idx) == 0:
+        return _empty_result()
+
+    rect_lin = cell_j * rectilinear_nx + cell_i
+
+    # -- apply masks early to avoid wasted clip work on excluded cells --
+    if rectilinear_grid_mask is not None or trimesh_mask is not None:
+        keep_masked = np.ones(len(tri_idx), dtype=bool)
+        if rectilinear_grid_mask is not None:
+            keep_masked &= rectilinear_grid_mask[rect_lin]
+        if trimesh_mask is not None:
+            keep_masked &= trimesh_mask[tri_idx]
+        tri_idx = tri_idx[keep_masked]
+        rect_lin = rect_lin[keep_masked]
+        if len(tri_idx) == 0:
+            return _empty_result()
+
+    # -- bbox pre-filter (cheap, avoids paying for the exact clip on
+    #    sliver/edge-touch candidates); cell bbox is just its own
+    #    local-frame edges, no need to go through world-frame corners --
+    cell_j_all, cell_i_all = np.divmod(rect_lin, rectilinear_nx)
+    cell_xmin = x_edges[cell_i_all]
+    cell_xmax = x_edges[cell_i_all + 1]
+    cell_ymin = y_edges[cell_j_all]
+    cell_ymax = y_edges[cell_j_all + 1]
+
+    cand_bbox_xmin = tri_bbox_xmin[tri_idx]
+    cand_bbox_xmax = tri_bbox_xmax[tri_idx]
+    cand_bbox_ymin = tri_bbox_ymin[tri_idx]
+    cand_bbox_ymax = tri_bbox_ymax[tri_idx]
+
+    bbox_dx = np.minimum(cell_xmax, cand_bbox_xmax) - np.maximum(
+        cell_xmin, cand_bbox_xmin
+    )
+    bbox_dy = np.minimum(cell_ymax, cand_bbox_ymax) - np.maximum(
+        cell_ymin, cand_bbox_ymin
+    )
+    nontrivial = (bbox_dx > 1e-15) & (bbox_dy > 1e-15)
+
+    tri_idx = tri_idx[nontrivial]
+    rect_lin = rect_lin[nontrivial]
+
+    if len(tri_idx) == 0:
+        return _empty_result()
+
+    # -- exact clip: every candidate is convex (triangle), so there is
+    #    no Shapely fallback branch on this path at all. Winding does
+    #    not matter here (`_clip_tri_rect_with_verts` clips against
+    #    fixed axis thresholds and takes abs() of the shoelace sum), so
+    #    no CCW normalization is needed either. The clip bounds are the
+    #    surviving subset of the cell extents already computed for the
+    #    pre-filter, so there is no second `divmod` + edge gather. --
+    areas, out_x, out_y, out_n = _batch_clip_areas_and_verts_tri_rect(
+        tri_lx[tri_idx],
+        tri_ly[tri_idx],
+        cell_xmin[nontrivial],
+        cell_ymin[nontrivial],
+        cell_xmax[nontrivial],
+        cell_ymax[nontrivial],
+    )
+
+    valid = areas > 1e-15
+    tri_idx = tri_idx[valid]
+    rect_lin = rect_lin[valid]
+    areas = areas[valid]
+    out_x = out_x[valid]
+    out_y = out_y[valid]
+    out_n = out_n[valid]
+
+    if len(tri_idx) == 0:
+        return _empty_result()
+
+    if rectilinear_is_source:
+        source_indices = rect_lin
+        target_indices = tri_idx
+        # uniform cell area -- divide by the scalar rather than
+        # materializing and gathering an n_rect array of copies
+        weights = areas / rect_cell_area
+    else:
+        source_indices = tri_idx
+        target_indices = rect_lin
+        weights = areas / trimesh.tri_area_m2[source_indices]
+
+    mat = coo_array(
+        (weights, (source_indices, target_indices)),
+        shape=(n_source, n_target),
+    ).tocsc()
+
+    # -- build intersection geometry from the same clip vertices
+    #    (out_x/out_y are in the rectilinear grid's local frame, i.e.
+    #    the same frame `tri_lx`/`tri_ly` and the clip bounds were
+    #    computed in) --
+    if with_intersections:
+        intersections = _pack_intersections(
+            _polygons_from_padded_verts(
+                out_x,
+                out_y,
+                out_n,
+                local_to_world=(rectilinear_center, rc_ca, rc_sa),
+            )
+        )
+    else:
+        intersections = _no_intersections()
+
+    if is_sanity_check:
+        _check_conservation(mat)
+
+    return mat, source_indices, target_indices, intersections
+
+
+# ===================================================================
+# TriMesh vs TriMesh: dedicated triangle-triangle clip.
+#
+# Every triangle is convex with exactly 3 vertices, so unlike the
+# generic arbitrary-polygon path, the exact overlap area never needs
+# GEOS: candidate pairs are still found via STRtree (a TriMesh has no
+# analytic structure to exploit for O(1) index arithmetic, unlike a
+# RectilinearGrid), but the area of each candidate pair is computed
+# with a fixed-size (3-vertex-in, <=6-vertex-out) numba/numpy
+# Sutherland-Hodgman clip instead of `shapely.intersection`.
+# ===================================================================
+
+
+@njit(cache=True)
+def _clip_triangle_pair_with_verts(
+    sx: np.ndarray,
+    sy: np.ndarray,
+    cx: np.ndarray,
+    cy: np.ndarray,
+    out_x: np.ndarray,
+    out_y: np.ndarray,
+) -> Tuple[float, int]:
+    """
+    Sutherland-Hodgman clip of a CCW subject triangle ``(sx, sy)``
+    against a CCW clip triangle ``(cx, cy)``, also writing the clipped
+    polygon's vertices into ``out_x``/``out_y`` (each length >= 9) and
+    returning ``(area, n_verts)``.
+
+    The clip polygon (a triangle) is convex, which is all
+    Sutherland-Hodgman requires of the *clip* side; the subject
+    triangle is convex too, so the intersection is guaranteed to be a
+    single connected convex polygon (at most 6 vertices, since each of
+    the 3 clip edges can add at most one vertex to a convex subject).
+    """
+    ax = np.empty(9)
+    ay = np.empty(9)
+    bx = np.empty(9)
+    by = np.empty(9)
+    n_in = 3
+    for p in range(3):
+        ax[p] = sx[p]
+        ay[p] = sy[p]
+
+    for e in range(3):
+        e1 = (e + 1) % 3
+        ex0, ey0 = cx[e], cy[e]
+        edx, edy = cx[e1] - ex0, cy[e1] - ey0
+        n_out = 0
+        if n_in < 3:
+            return 0.0, 0
+        for i in range(n_in):
+            pi = n_in - 1 if i == 0 else i - 1
+            c_in = edx * (ay[i] - ey0) - edy * (ax[i] - ex0) >= 0.0
+            p_in = edx * (ay[pi] - ey0) - edy * (ax[pi] - ex0) >= 0.0
+            if p_in != c_in:
+                dxp, dyp = ax[i] - ax[pi], ay[i] - ay[pi]
+                denom = edx * dyp - edy * dxp
+                t = (
+                    0.0
+                    if denom == 0.0
+                    else (edx * (ay[pi] - ey0) - edy * (ax[pi] - ex0)) / -denom
+                )
+                bx[n_out] = ax[pi] + t * dxp
+                by[n_out] = ay[pi] + t * dyp
+                n_out += 1
+            if c_in:
+                bx[n_out] = ax[i]
+                by[n_out] = ay[i]
+                n_out += 1
+        n_in = n_out
+        for p in range(n_in):
+            ax[p] = bx[p]
+            ay[p] = by[p]
+
+    if n_in < 3:
+        return 0.0, 0
+    area = 0.0
+    for i in range(n_in):
+        j = (i + 1) % n_in
+        area += ax[i] * ay[j] - ax[j] * ay[i]
+        out_x[i] = ax[i]
+        out_y[i] = ay[i]
+    return abs(area) * 0.5, n_in
+
+
+@njit(parallel=True, cache=True)
+def _batch_clip_triangles_and_verts(
+    sx: np.ndarray, sy: np.ndarray, cx: np.ndarray, cy: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n = sx.shape[0]
+    areas = np.empty(n)
+    out_x = np.zeros((n, 9))
+    out_y = np.zeros((n, 9))
+    out_n = np.zeros(n, dtype=np.intp)
+    for k in prange(n):  # ty:ignore[not-iterable]
+        area, n_verts = _clip_triangle_pair_with_verts(
+            sx[k], sy[k], cx[k], cy[k], out_x[k], out_y[k]
+        )
+        areas[k] = area
+        out_n[k] = n_verts
+    return areas, out_x, out_y, out_n
+
+
+def _sh_clip_python_generic_with_verts(subject: list, clip: list) -> Tuple[float, list]:
+    """
+    Pure-Python Sutherland-Hodgman clip + shoelace, for an arbitrary
+    convex ``clip`` polygon (not restricted to an axis-aligned
+    rectangle). Both ``subject`` and ``clip`` are lists of ``(x, y)``
+    tuples, CCW. Returns ``(area, clipped_verts)``.
+    """
+    output = subject
+    n_clip = len(clip)
+    for e in range(n_clip):
+        if len(output) < 3:
+            return 0.0, []
+        ex0, ey0 = clip[e]
+        ex1, ey1 = clip[(e + 1) % n_clip]
+        edx, edy = ex1 - ex0, ey1 - ey0
+        inp = output
+        output = []
+        for i in range(len(inp)):
+            cur = inp[i]
+            prev = inp[i - 1]
+            c_in = edx * (cur[1] - ey0) - edy * (cur[0] - ex0) >= 0.0
+            p_in = edx * (prev[1] - ey0) - edy * (prev[0] - ex0) >= 0.0
+            if p_in != c_in:
+                dxp, dyp = cur[0] - prev[0], cur[1] - prev[1]
+                denom = edx * dyp - edy * dxp
+                t = (
+                    0.0
+                    if denom == 0.0
+                    else (edx * (prev[1] - ey0) - edy * (prev[0] - ex0)) / -denom
+                )
+                output.append((prev[0] + t * dxp, prev[1] + t * dyp))
+            if c_in:
+                output.append(cur)
+    if len(output) < 3:
+        return 0.0, []
+    area = 0.0
+    n = len(output)
+    for i in range(n):
+        j = (i + 1) % n
+        area += output[i][0] * output[j][1] - output[j][0] * output[i][1]
+    return abs(area) * 0.5, output
+
+
+def _batch_clip_triangles_numpy_and_verts(
+    sx: np.ndarray, sy: np.ndarray, cx: np.ndarray, cy: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Pure-Python fallback for :func:`_batch_clip_triangles_and_verts`."""
+    n = sx.shape[0]
+    areas = np.empty(n)
+    out_x = np.zeros((n, 9))
+    out_y = np.zeros((n, 9))
+    out_n = np.zeros(n, dtype=np.intp)
+    for k in range(n):
+        subj = list(zip(sx[k].tolist(), sy[k].tolist()))
+        clip = list(zip(cx[k].tolist(), cy[k].tolist()))
+        area, out_poly = _sh_clip_python_generic_with_verts(subj, clip)
+        areas[k] = area
+        m = len(out_poly)
+        out_n[k] = m
+        for p in range(m):
+            out_x[k, p] = out_poly[p][0]
+            out_y[k, p] = out_poly[p][1]
+    return areas, out_x, out_y, out_n
+
+
+def _batch_clip_triangles_and_verts_dispatch(
+    sx: np.ndarray, sy: np.ndarray, cx: np.ndarray, cy: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Dispatch to the fastest available triangle-triangle clip
+    back-end, also returning clipped vertices."""
+    if _HAS_NUMBA:
+        return _batch_clip_triangles_and_verts(
+            np.ascontiguousarray(sx),
+            np.ascontiguousarray(sy),
+            np.ascontiguousarray(cx),
+            np.ascontiguousarray(cy),
+        )
+    return _batch_clip_triangles_numpy_and_verts(sx, sy, cx, cy)
+
+
+def _compute_transfer_matrix_trimesh(
+    source_mesh: TriMesh,
+    target_mesh: TriMesh,
+    source_grid_mask: Optional[NDArrayBool] = None,
+    target_grid_mask: Optional[NDArrayBool] = None,
+    is_sanity_check: bool = False,
+    with_intersections: bool = True,
+) -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
+    """
+    Build a conservative transfer matrix between two triangular
+    meshes.
+
+    Candidate triangle pairs are found via an STRtree built on
+    ``source_mesh`` (no analytic index is available for an irregular
+    mesh, unlike a :class:`RectilinearGrid`), but the overlap area of
+    each candidate pair is computed with a dedicated numba/numpy
+    triangle-triangle Sutherland-Hodgman clip rather than
+    ``shapely.intersection`` -- avoiding GEOS entirely in the hot loop.
+
+    Parameters
+    ----------
+    source_mesh, target_mesh : TriMesh
+        Source and target triangular meshes.
+    source_grid_mask : 1-D array of bool, optional
+        Boolean mask over source triangles (length
+        ``source_mesh.n_tri``). Masked-out triangles are excluded from
+        the STRtree and contribute no nonzero row. If ``None``, all
+        source triangles are considered.
+    target_grid_mask : 1-D array of bool, optional
+        Boolean mask over target triangles (length
+        ``target_mesh.n_tri``), with the same convention as
+        ``source_grid_mask`` but excluding columns instead of rows. If
+        ``None``, all target triangles are considered.
+    is_sanity_check : bool, optional
+        If True, verify that every fully-covered, unmasked source
+        triangle conserves its quantity exactly (up to 1e-10).
+
+    Returns
+    -------
+    W : csc_array, shape (source_mesh.n_tri, target_mesh.n_tri)
+        Sparse conservative transfer matrix.
+    source_indices, target_indices : NDArrayInt, shape (nnz,)
+        Source / target triangle id of each nonzero entry.
+    intersections : IntersectionsArray, shape (nnz,)
+        One intersection ``Polygon`` (in world coordinates -- the
+        triangle-triangle clip already works directly in world frame,
+        unlike the rectilinear paths) per nonzero matrix entry, built
+        via :func:`_polygons_from_padded_verts` from the same clipped
+        vertices the area computation already produced -- no GEOS
+        clipping call, only vectorized ``shapely.polygons``
+        construction.
+    """
+    n_source = source_mesh.n_tri
+    n_target = target_mesh.n_tri
+
+    source_grid_mask = _validate_mask(source_grid_mask, n_source, "source_grid_mask")
+    target_grid_mask = _validate_mask(target_grid_mask, n_target, "target_grid_mask")
+
+    empty = (
+        csc_array((n_source, n_target)),
+        np.empty(0, dtype=np.intp),
+        np.empty(0, dtype=np.intp),
+        _no_intersections(),
+    )
+    if n_source == 0 or n_target == 0:
+        return empty
+
+    # -- triangle vertices straight from numpy; used for the bbox
+    #    pre-filter below (no `shapely.bounds` call) and for the clip --
+    src_tx, src_ty = _tri_world_coords(source_mesh)
+    tgt_tx, tgt_ty = _tri_world_coords(target_mesh)
+
+    # -- STRtree candidate search (Shapely used only for the spatial
+    #    index, never for the area computation) --
+    src_polys = np.asarray(source_mesh.to_shapely().geoms, dtype=object)
+    tgt_polys = np.asarray(target_mesh.to_shapely().geoms, dtype=object)
+
+    keep_src = (
+        np.flatnonzero(source_grid_mask)
+        if source_grid_mask is not None
+        else np.arange(n_source)
+    )
+    keep_tgt = (
+        np.flatnonzero(target_grid_mask)
+        if target_grid_mask is not None
+        else np.arange(n_target)
+    )
+    if len(keep_src) == 0 or len(keep_tgt) == 0:
+        return empty
+
+    # No `predicate="intersects"`: that makes GEOS run an exact
+    # intersection test on every bbox candidate, but the exact
+    # Sutherland-Hodgman clip below is already the source of truth and
+    # returns zero area for non-overlapping pairs (with a cheap bbox
+    # pre-filter in front of it). A plain bbox query is markedly
+    # cheaper and also removes the need to `shapely.prepare` the tree
+    # geometries; the few extra candidates it admits are rejected
+    # downstream at negligible cost.
+    tree = STRtree(src_polys[keep_src])
+    pairs = tree.query(tgt_polys[keep_tgt])
+    tgt_local, src_local = pairs[0], pairs[1]
+
+    if len(src_local) == 0:
+        return empty
+
+    source_indices = keep_src[src_local]
+    target_indices = keep_tgt[tgt_local]
+
+    # -- cheap bbox pre-filter before the exact clip. Per-triangle
+    #    bounds come from vectorized min/max over the fixed (n_tri, 3)
+    #    vertex arrays, computed once per mesh and then gathered --
+    #    rather than `shapely.bounds` on a candidate array that repeats
+    #    each triangle once per pair. --
+    src_bx0, src_bx1 = src_tx.min(axis=1), src_tx.max(axis=1)
+    src_by0, src_by1 = src_ty.min(axis=1), src_ty.max(axis=1)
+    tgt_bx0, tgt_bx1 = tgt_tx.min(axis=1), tgt_tx.max(axis=1)
+    tgt_by0, tgt_by1 = tgt_ty.min(axis=1), tgt_ty.max(axis=1)
+
+    bbox_dx = np.minimum(src_bx1[source_indices], tgt_bx1[target_indices]) - np.maximum(
+        src_bx0[source_indices], tgt_bx0[target_indices]
+    )
+    bbox_dy = np.minimum(src_by1[source_indices], tgt_by1[target_indices]) - np.maximum(
+        src_by0[source_indices], tgt_by0[target_indices]
+    )
+    nontrivial = (bbox_dx > 1e-15) & (bbox_dy > 1e-15)
+    source_indices = source_indices[nontrivial]
+    target_indices = target_indices[nontrivial]
+
+    if len(source_indices) == 0:
+        return empty
+
+    # -- exact overlap area AND clipped vertices: triangle-triangle
+    #    numba/numpy clip --
+    src_tx, src_ty = _ensure_ccw_triangles(src_tx, src_ty)
+    tgt_tx, tgt_ty = _ensure_ccw_triangles(tgt_tx, tgt_ty)
+
+    areas, out_x, out_y, out_n = _batch_clip_triangles_and_verts_dispatch(
+        src_tx[source_indices],
+        src_ty[source_indices],
+        tgt_tx[target_indices],
+        tgt_ty[target_indices],
+    )
+
+    valid = areas > 1e-15
+    source_indices = source_indices[valid]
+    target_indices = target_indices[valid]
+    areas = areas[valid]
+    out_x = out_x[valid]
+    out_y = out_y[valid]
+    out_n = out_n[valid]
+
+    weights = areas / source_mesh.tri_area_m2[source_indices]
+
+    mat = coo_array(
+        (weights, (source_indices, target_indices)),
+        shape=(n_source, n_target),
+    ).tocsc()
+
+    # -- build intersection geometry from the same clip vertices. These
+    #    are already in world coordinates (the triangle-triangle clip
+    #    never transforms to a local frame), so no local_to_world
+    #    rotation/translation is applied here. --
+    if with_intersections:
+        intersections = _pack_intersections(
+            _polygons_from_padded_verts(out_x, out_y, out_n)
+        )
+    else:
+        intersections = _no_intersections()
+
+    if is_sanity_check:
+        _check_conservation(mat)
+
+    return mat, source_indices, target_indices, intersections
+
+
+# ===================================================================
+# TriMesh vs arbitrary MultiPolygon.
+#
+# Neither side has a regular structure to exploit for an analytic
+# index, so candidate pairs are found via STRtree, exactly like the
+# fully-generic path. The difference is in how the area of each
+# candidate pair is computed: the TriMesh side is always convex (3
+# vertices), so it is used as the *clip* polygon in a generic
+# convex-vs-convex Sutherland-Hodgman clip; the arbitrary-polygon side
+# is the *subject* and only needs to be checked for convexity (not the
+# triangle side, which is skipped -- same idea as
+# ``polygon_grid_is_convex`` in the rectilinear/polygon mixed path).
+# Convex subjects bypass Shapely entirely; non-convex/holed subjects
+# fall back to `shapely.intersection`.
+#
+# Unlike the rectilinear/TriMesh case, this path still needs
+# `TriMesh.to_shapely()` for the STRtree, since there is no analytic
+# index available on either side here.
+# ===================================================================
+
+
+def _compute_transfer_matrix_trimesh_polygon(
+    trimesh: TriMesh,
+    polygon_grid: shapely.MultiPolygon,
+    trimesh_is_source: bool,
+    trimesh_mask: Optional[NDArrayBool] = None,
+    polygon_mask: Optional[NDArrayBool] = None,
+    is_sanity_check: bool = False,
+    with_intersections: bool = True,
+) -> Tuple[csc_array, NDArrayInt, NDArrayInt, IntersectionsArray]:
+    """
+    Conservative transfer matrix between a :class:`TriMesh` and an
+    arbitrary polygon grid.
+
+    Parameters
+    ----------
+    trimesh : TriMesh
+        Triangular mesh, either the source or the target (see
+        ``trimesh_is_source``).
+    polygon_grid : shapely.MultiPolygon
+        The other side of the transfer.
+    trimesh_is_source : bool
+        If True, ``trimesh`` is the source and ``polygon_grid`` is the
+        target. If False, the roles are reversed.
+    trimesh_mask : 1-D array of bool, optional
+        Boolean mask over ``trimesh`` triangles (length
+        ``trimesh.n_tri``). Masked-out triangles contribute no nonzero
+        entry. If ``None``, all triangles are considered.
+    polygon_mask : 1-D array of bool, optional
+        Boolean mask over ``polygon_grid`` polygons (length
+        ``len(polygon_grid.geoms)``). If ``None``, all polygons are
+        considered.
+    is_sanity_check : bool, optional
+        If True, verify conservation for fully-covered, unmasked
+        source cells.
+
+    Returns
+    -------
+    W : csc_array, shape (n_source, n_target)
+        Sparse conservative transfer matrix.
+    source_indices, target_indices : NDArrayInt, shape (nnz,)
+        Row / column index of each nonzero entry.
+    intersections : IntersectionsArray, shape (nnz,)
+        Intersection geometries for each nonzero entry. Entries
+        produced by the fast convex-clip path are ``None``
+        placeholders (area-only clipper); entries produced by the
+        Shapely fallback carry the exact geometry.
+    """
+    n_tri = trimesh.n_tri
+    n_poly = len(polygon_grid.geoms)
+
+    trimesh_mask = _validate_mask(trimesh_mask, n_tri, "trimesh mask")
+    polygon_mask = _validate_mask(polygon_mask, n_poly, "polygon mask")
+
+    n_source = n_tri if trimesh_is_source else n_poly
+    n_target = n_poly if trimesh_is_source else n_tri
+    empty = (
+        csc_array((n_source, n_target)),
+        np.empty(0, dtype=np.intp),
+        np.empty(0, dtype=np.intp),
+        _no_intersections(),
+    )
+    if n_tri == 0 or n_poly == 0:
+        return empty
+
+    tri_polys = np.asarray(trimesh.to_shapely().geoms, dtype=object)
+    poly_polys = np.asarray(polygon_grid.geoms, dtype=object)
+
+    # Single GEOS extraction of the polygon side, shared by the
+    # convexity test and the padded clip buffers below.
+    poly_data = _PolygonVertexData(poly_polys)
+    tri_tx, tri_ty = _tri_world_coords(trimesh)
+
+    keep_tri = (
+        np.flatnonzero(trimesh_mask) if trimesh_mask is not None else np.arange(n_tri)
+    )
+    keep_poly = (
+        np.flatnonzero(polygon_mask) if polygon_mask is not None else np.arange(n_poly)
+    )
+    if len(keep_tri) == 0 or len(keep_poly) == 0:
+        return empty
+
+    # -- STRtree candidate search: tree built over the (always convex,
+    #    cheap to prepare) triangle side, queried with the polygon
+    #    side. --
+    # Bbox-only query (no exact `intersects` predicate): the bbox
+    # pre-filter plus the exact clip below already reject non-overlaps,
+    # so paying GEOS for an exact test per candidate is redundant.
+    tree = STRtree(tri_polys[keep_tri])
+    pairs = tree.query(poly_polys[keep_poly])
+    poly_local, tri_local = pairs[0], pairs[1]
+
+    if len(tri_local) == 0:
+        return empty
+
+    tri_indices = keep_tri[tri_local]
+    poly_indices = keep_poly[poly_local]
+
+    # -- bbox pre-filter, from per-object bounds computed once and
+    #    then gathered (the candidate index arrays repeat each triangle
+    #    and each polygon once per pair, so calling `shapely.bounds`
+    #    on them recomputed the same bounds many times over) --
+    tri_bx0, tri_bx1 = tri_tx.min(axis=1), tri_tx.max(axis=1)
+    tri_by0, tri_by1 = tri_ty.min(axis=1), tri_ty.max(axis=1)
+    poly_bounds_all = shapely.bounds(poly_polys)
+
+    bbox_dx = np.minimum(
+        tri_bx1[tri_indices], poly_bounds_all[poly_indices, 2]
+    ) - np.maximum(tri_bx0[tri_indices], poly_bounds_all[poly_indices, 0])
+    bbox_dy = np.minimum(
+        tri_by1[tri_indices], poly_bounds_all[poly_indices, 3]
+    ) - np.maximum(tri_by0[tri_indices], poly_bounds_all[poly_indices, 1])
+    nontrivial = (bbox_dx > 1e-15) & (bbox_dy > 1e-15)
+    tri_indices = tri_indices[nontrivial]
+    poly_indices = poly_indices[nontrivial]
+
+    if len(tri_indices) == 0:
+        return empty
+
+    # -- split by convexity of the polygon side only; the triangle
+    #    side is always convex, so it is never tested. --
+    candidate_is_convex = poly_data.convexity()[poly_indices]
+
+    tri_idx_cvx = tri_indices[candidate_is_convex]
+    poly_idx_cvx = poly_indices[candidate_is_convex]
+    tri_idx_gen = tri_indices[~candidate_is_convex]
+    poly_idx_gen = poly_indices[~candidate_is_convex]
+
+    result_tri_parts = []
+    result_poly_parts = []
+    result_area_parts = []
+    result_ix_parts = []
+
+    # -- fast path: convex polygon subject, triangle clip window --
+    if len(poly_idx_cvx) > 0:
+        ccw_tx, ccw_ty = _ensure_ccw_triangles(tri_tx, tri_ty)
+
+        # Padded buffers built once per polygon (world frame -- the
+        # triangle clip window is arbitrary, so no local-frame
+        # transform is involved on this path) and gathered per
+        # candidate, instead of re-extracting coordinates from GEOS
+        # once per candidate pair.
+        clip_width = _clip_buffer_width(poly_data.max_verts, n_clip_edges=3)
+        vx_all, vy_all = poly_data.padded_vertex_buffers(clip_width)
+
+        areas_cvx, out_x_cvx, out_y_cvx, out_n_cvx = (
+            _batch_clip_areas_and_verts_convexclip(
+                np.ascontiguousarray(vx_all[poly_idx_cvx]),
+                np.ascontiguousarray(vy_all[poly_idx_cvx]),
+                poly_data.true_n[poly_idx_cvx].astype(np.intp),
+                np.ascontiguousarray(ccw_tx[tri_idx_cvx]),
+                np.ascontiguousarray(ccw_ty[tri_idx_cvx]),
+            )
+        )
+
+        valid_cvx = areas_cvx > 1e-15
+        result_tri_parts.append(tri_idx_cvx[valid_cvx])
+        result_poly_parts.append(poly_idx_cvx[valid_cvx])
+        result_area_parts.append(areas_cvx[valid_cvx])
+        if with_intersections:
+            # Geometry from the same clipped vertices used for the area
+            # (already world-frame, so no rotation needed).
+            result_ix_parts.append(
+                _polygons_from_padded_verts(
+                    out_x_cvx[valid_cvx], out_y_cvx[valid_cvx], out_n_cvx[valid_cvx]
+                )
+            )
+
+    # -- general path: non-convex / holed polygon subject, Shapely clip --
+    if len(poly_idx_gen) > 0:
+        intersections_gen = shapely.intersection(
+            tri_polys[tri_idx_gen], poly_polys[poly_idx_gen]
+        )
+        areas_gen = shapely.area(intersections_gen)
+        valid_gen = areas_gen > 1e-15
+        result_tri_parts.append(tri_idx_gen[valid_gen])
+        result_poly_parts.append(poly_idx_gen[valid_gen])
+        result_area_parts.append(areas_gen[valid_gen])
+        if with_intersections:
+            result_ix_parts.append(intersections_gen[valid_gen])
+
+    tri_indices = np.concatenate(result_tri_parts)
+    poly_indices = np.concatenate(result_poly_parts)
+    intersection_areas = np.concatenate(result_area_parts)
+
+    valid = intersection_areas > 1e-15
+    tri_indices = tri_indices[valid]
+    poly_indices = poly_indices[valid]
+    intersection_areas = intersection_areas[valid]
+
+    if with_intersections:
+        intersections = np.concatenate(result_ix_parts)[valid]
+    else:
+        intersections = _no_intersections()
+
+    if trimesh_is_source:
+        source_indices = tri_indices
+        target_indices = poly_indices
+        source_areas = trimesh.tri_area_m2
+    else:
+        source_indices = poly_indices
+        target_indices = tri_indices
+        source_areas = shapely.area(poly_polys)
 
     weights = intersection_areas / source_areas[source_indices]
 
@@ -1979,13 +3603,278 @@ def _compute_transfer_matrix_mixed(
         mat,
         source_indices,
         target_indices,
-        shapely.MultiPolygon(list(intersections)),
+        _pack_intersections(intersections) if with_intersections else intersections,
+    )
+
+
+# -------------------------------------------------------------------
+# Generic convex-subject-vs-convex-clip-window clip (used by the
+# TriMesh-vs-polygon path above): the clip window is an arbitrary
+# triangle rather than an axis-aligned rectangle, so this generalizes
+# `_clip_nverts_with_verts` (rect clip window) the same way
+# `_clip_triangle_pair_with_verts` generalizes it to a triangle
+# *subject*.
+# -------------------------------------------------------------------
+
+
+@njit(cache=True)
+def _clip_convexclip_with_verts(
+    subj_x: np.ndarray,
+    subj_y: np.ndarray,
+    n_subj: int,
+    clip_x: np.ndarray,
+    clip_y: np.ndarray,
+    out_x: np.ndarray,
+    out_y: np.ndarray,
+) -> Tuple[float, int]:
+    """
+    Sutherland-Hodgman clip of a convex ``n_subj``-vertex subject
+    polygon (CCW) against a CCW clip triangle, also writing the
+    clipped polygon's vertices into ``out_x``/``out_y`` (each length
+    >= ``_MAX_CLIP_VERTS``) and returning ``(area, n_out_verts)``.
+    """
+    MAX_V = _MAX_CLIP_VERTS
+    ax = np.empty(MAX_V)
+    ay = np.empty(MAX_V)
+    bx = np.empty(MAX_V)
+    by = np.empty(MAX_V)
+    n_in = n_subj
+    for p in range(n_subj):
+        ax[p] = subj_x[p]
+        ay[p] = subj_y[p]
+
+    for e in range(3):
+        e1 = (e + 1) % 3
+        ex0, ey0 = clip_x[e], clip_y[e]
+        edx, edy = clip_x[e1] - ex0, clip_y[e1] - ey0
+        n_out = 0
+        if n_in < 3:
+            return 0.0, 0
+        for i in range(n_in):
+            pi = n_in - 1 if i == 0 else i - 1
+            c_in = edx * (ay[i] - ey0) - edy * (ax[i] - ex0) >= 0.0
+            p_in = edx * (ay[pi] - ey0) - edy * (ax[pi] - ex0) >= 0.0
+            if p_in != c_in:
+                dxp, dyp = ax[i] - ax[pi], ay[i] - ay[pi]
+                denom = edx * dyp - edy * dxp
+                t = (
+                    0.0
+                    if denom == 0.0
+                    else (edx * (ay[pi] - ey0) - edy * (ax[pi] - ex0)) / -denom
+                )
+                bx[n_out] = ax[pi] + t * dxp
+                by[n_out] = ay[pi] + t * dyp
+                n_out += 1
+            if c_in:
+                bx[n_out] = ax[i]
+                by[n_out] = ay[i]
+                n_out += 1
+        n_in = n_out
+        for p in range(n_in):
+            ax[p] = bx[p]
+            ay[p] = by[p]
+
+    if n_in < 3:
+        return 0.0, 0
+    area = 0.0
+    for i in range(n_in):
+        j = (i + 1) % n_in
+        area += ax[i] * ay[j] - ax[j] * ay[i]
+        out_x[i] = ax[i]
+        out_y[i] = ay[i]
+    return abs(area) * 0.5, n_in
+
+
+@njit(parallel=True, cache=True)
+def _batch_clip_numba_convexclip_and_verts(
+    subj_vx: np.ndarray,
+    subj_vy: np.ndarray,
+    n_subj: np.ndarray,
+    clip_vx: np.ndarray,
+    clip_vy: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    N = len(n_subj)
+    width = subj_vx.shape[1]
+    areas = np.empty(N)
+    out_x = np.zeros((N, width))
+    out_y = np.zeros((N, width))
+    out_n = np.zeros(N, dtype=np.intp)
+    for idx in prange(N):  # ty:ignore[not-iterable]
+        area, n_out_verts = _clip_convexclip_with_verts(
+            subj_vx[idx],
+            subj_vy[idx],
+            n_subj[idx],
+            clip_vx[idx],
+            clip_vy[idx],
+            out_x[idx],
+            out_y[idx],
+        )
+        areas[idx] = area
+        out_n[idx] = n_out_verts
+    return areas, out_x, out_y, out_n
+
+
+def _batch_clip_numpy_convexclip_and_verts(
+    subj_vx: np.ndarray,
+    subj_vy: np.ndarray,
+    n_subj: np.ndarray,
+    clip_vx: np.ndarray,
+    clip_vy: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Numpy/pure-Python fallback for :func:`_batch_clip_numba_convexclip_and_verts`."""
+    N = len(n_subj)
+    width = subj_vx.shape[1]
+    areas = np.empty(N)
+    out_x = np.zeros((N, width))
+    out_y = np.zeros((N, width))
+    out_n = np.zeros(N, dtype=np.intp)
+    for k in range(N):
+        m = int(n_subj[k])
+        subj = list(zip(subj_vx[k, :m].tolist(), subj_vy[k, :m].tolist()))
+        clip = list(zip(clip_vx[k].tolist(), clip_vy[k].tolist()))
+        area, out_poly = _sh_clip_python_generic_with_verts(subj, clip)
+        areas[k] = area
+        mo = len(out_poly)
+        out_n[k] = mo
+        for p in range(mo):
+            out_x[k, p] = out_poly[p][0]
+            out_y[k, p] = out_poly[p][1]
+    return areas, out_x, out_y, out_n
+
+
+def _batch_clip_areas_and_verts_convexclip(
+    subj_vx: np.ndarray,
+    subj_vy: np.ndarray,
+    n_subj: np.ndarray,
+    clip_vx: np.ndarray,
+    clip_vy: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Dispatch to the fastest available convex-vs-triangle clip
+    back-end, also returning clipped vertices."""
+    if _HAS_NUMBA:
+        return _batch_clip_numba_convexclip_and_verts(
+            subj_vx, subj_vy, n_subj, clip_vx, clip_vy
+        )
+    return _batch_clip_numpy_convexclip_and_verts(
+        subj_vx, subj_vy, n_subj, clip_vx, clip_vy
     )
 
 
 # ===================================================================
 # Sanity check
 # ===================================================================
+
+
+def _polygons_from_padded_verts(
+    vx: np.ndarray,
+    vy: np.ndarray,
+    n_verts: np.ndarray,
+    local_to_world: Optional[Tuple[np.ndarray, float, float]] = None,
+) -> np.ndarray:
+    """
+    Build an array of ``shapely.Polygon`` objects from a padded,
+    per-row clipped-vertex buffer, using the vectorized
+    ``shapely.polygons`` constructor (object construction only -- this
+    never invokes GEOS's own clipping/intersection algorithm, since
+    the vertices were already computed by one of this module's own
+    numba/numpy Sutherland-Hodgman kernels).
+
+    Parameters
+    ----------
+    vx, vy : ndarray, shape (N, max_verts)
+        Padded clipped-polygon vertex coordinates, one row per pair.
+        Only the first ``n_verts[k]`` columns of row ``k`` are
+        meaningful; the rest may hold arbitrary padding.
+    n_verts : ndarray, shape (N,)
+        Number of meaningful vertices per row. Rows with
+        ``n_verts[k] < 3`` produce ``None`` (no valid polygon).
+    local_to_world : (center, cos_angle, sin_angle), optional
+        If given, vertices are first rotated by ``(cos_angle,
+        sin_angle)`` and translated by ``center`` -- i.e. mapped from
+        a grid's local (unrotated) frame into world coordinates -- to
+        match the convention used elsewhere in this module (e.g. the
+        fully generic path, which always works and reports geometry
+        in world coordinates). If ``None``, ``vx``/``vy`` are assumed
+        to already be in world coordinates.
+
+    Returns
+    -------
+    polys : ndarray of object, shape (N,)
+        One ``shapely.Polygon`` (or ``None`` where ``n_verts[k] < 3``)
+        per row, in the same order as the input.
+    """
+    N = len(n_verts)
+    polys = np.full(N, None, dtype=object)
+    valid = n_verts >= 3
+    if not valid.any():
+        return polys
+
+    idx = np.flatnonzero(valid)
+    counts = n_verts[idx]
+
+    # Group by distinct vertex count and build each group with one
+    # vectorized `shapely.polygons` call on a regular (n_rows, k, 2)
+    # array. There are typically only a handful of distinct counts
+    # (e.g. {4}, or {3, 4, 5, 6} for a rotated-cell clip).
+    #
+    # A ragged one-shot alternative exists -- `shapely.linearrings`
+    # accepts a flat coordinate array plus an `indices` argument, which
+    # would build every polygon in a single call regardless of vertex
+    # count -- but it measured consistently *slower* than this grouped
+    # form (~0.8x on a representative rotated rectilinear workload with
+    # shapely 2.1.2): the per-group calls operate on contiguous regular
+    # arrays, which GEOS ingests faster than an indices-driven ragged
+    # batch, and that outweighs the cost of the few extra calls.
+    #
+    # The world transform is applied per group, so it touches only the
+    # `counts.sum()` coordinates that are actually used rather than the
+    # full padded block (most of whose columns are padding).
+    for k in np.unique(counts):
+        rows = idx[counts == k]
+        sub_vx = vx[rows, :k]
+        sub_vy = vy[rows, :k]
+        if local_to_world is not None:
+            center, ca, sa = local_to_world
+            wx = center[0] + sub_vx * ca - sub_vy * sa
+            wy = center[1] + sub_vx * sa + sub_vy * ca
+        else:
+            wx, wy = sub_vx, sub_vy
+        polys[rows] = shapely.polygons(np.stack([wx, wy], axis=-1))
+
+    return polys
+
+
+def _no_intersections() -> IntersectionsArray:
+    """
+    The empty :data:`IntersectionsArray` returned whenever per-pair
+    geometry was not requested (``with_intersections=False``) or a path
+    produced no candidate pairs at all.
+    """
+    return np.empty(0, dtype=object)
+
+
+def _pack_intersections(intersections: np.ndarray) -> IntersectionsArray:
+    """
+    Package a per-nonzero-entry array of intersection geometries for
+    return, preserving alignment with the matrix's nonzero entries.
+
+    This is a thin, defensive pass-through: every code path in this
+    module builds an ``intersections`` entry (a ``shapely.Polygon``,
+    occasionally a ``shapely.MultiPolygon`` on the exact Shapely-clip
+    fallback branches -- e.g. when a concave polygon's intersection
+    with an axis-aligned cell splits into disjoint pieces -- or a
+    ``None`` placeholder on the fast analytic paths) for every nonzero
+    matrix coefficient, so the input is already length-aligned with
+    the matrix's ``nnz``. This function simply normalizes it to a
+    plain ``numpy`` object array (see :data:`IntersectionsArray`) so
+    every dispatch branch in this module returns the exact same type,
+    regardless of whether the entries happen to be uniform single
+    ``Polygon`` objects or a mix that also includes ``None`` /
+    ``MultiPolygon`` entries -- unlike ``shapely.MultiPolygon(...)``,
+    which cannot represent either of those cases (it silently drops
+    ``None`` entries and raises on non-``Polygon`` geometry).
+    """
+    return np.asarray(intersections, dtype=object)
 
 
 def _check_conservation(mat: csc_array) -> None:
@@ -1998,4 +3887,38 @@ def _check_conservation(mat: csc_array) -> None:
             atol=1e-10,
             err_msg="Conservation violated: some fully-covered source cells "
             "do not have row sums equal to 1.",
+        )
+
+
+def _check_intersections_alignment(
+    mat: csc_array, intersections: IntersectionsArray
+) -> None:
+    """
+    Verify that ``mat.nnz == len(intersections)``.
+
+    This holds for every code path that returns one ``intersections``
+    entry (real geometry or a ``None`` placeholder) per nonzero matrix
+    coefficient -- i.e. the fully generic path
+    (:func:`_compute_transfer_matrix`), the rectilinear/polygon mixed
+    path (:func:`_compute_transfer_matrix_mixed`), and the
+    TriMesh/polygon path (:func:`_compute_transfer_matrix_trimesh_polygon`).
+
+    It does NOT hold, by design, for the purely analytic (Shapely-free)
+    paths that never materialize per-pair geometry at all --
+    :func:`_compute_transfer_matrix_rectilinear`,
+    :func:`_compute_transfer_matrix_rect_trimesh`, and
+    :func:`_compute_transfer_matrix_trimesh` -- which always return an
+    *empty* ``intersections`` regardless of ``mat.nnz``. This check is
+    therefore only wired into
+    :func:`compute_transfer_matrix_with_intersections` for the three
+    paths listed above where the invariant is actually meant to hold.
+    """
+    n_intersections = len(intersections)
+    if mat.nnz != n_intersections:
+        raise AssertionError(
+            "Intersection/matrix misalignment: W.nnz "
+            f"({mat.nnz}) != len(intersections) ({n_intersections}). "
+            "Every nonzero matrix entry must have exactly one "
+            "corresponding (possibly None-placeholder) intersection "
+            "geometry."
         )
