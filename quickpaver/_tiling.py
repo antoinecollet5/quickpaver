@@ -5,8 +5,9 @@
 grid alignment with a given point."""
 
 import math
-from collections import defaultdict
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import shapely
@@ -16,6 +17,233 @@ from numpy.typing import ArrayLike
 from quickpaver._types import NDArrayFloat, NDArrayInt, StrEnum
 
 SQRT3 = math.sqrt(3)
+
+
+@dataclass(frozen=True)
+class Disk:
+    """A disk described analytically by its centre and radius.
+
+    A :class:`Disk` is accepted anywhere a ``surface_to_cover`` is expected.
+    Passing one instead of ``shapely.Point(...).buffer(radius)`` is both
+    faster and more accurate: the tiling functions then decide tile
+    membership with the exact circle rather than with the inscribed polygon
+    that :meth:`shapely.Geometry.buffer` produces, and they never call a
+    geometric predicate.
+
+    Parameters
+    ----------
+    center : tuple of (float, float)
+        ``(x, y)`` world-space coordinates of the disk centre.
+    radius : float
+        Radius of the disk. Must be strictly positive.
+
+    Raises
+    ------
+    ValueError
+        If ``radius`` is not strictly positive.
+
+    Examples
+    --------
+    >>> tiling, adjacency = gen_hexagonal_tiling(Disk((0.0, 0.0), 5.0), 1.0)
+    """
+
+    center: Tuple[float, float]
+    radius: float
+
+    def __post_init__(self) -> None:
+        if self.radius <= 0.0:
+            raise ValueError("radius must be strictly positive.")
+
+    @property
+    def bounds(self) -> Tuple[float, float, float, float]:
+        """Return ``(x_min, y_min, x_max, y_max)`` of the disk."""
+        x, y = self.center
+        r = self.radius
+        return (x - r, y - r, x + r, y + r)
+
+    @property
+    def centroid(self) -> shapely.Point:
+        """Return the disk centre as a :class:`shapely.Point`."""
+        return shapely.Point(self.center)
+
+    def as_array(self) -> NDArrayFloat:
+        """Return the disk centre as an array of shape ``(2,)``."""
+        return np.asarray(self.center, dtype=float)
+
+    def to_polygon(self, quad_segs: int = 64) -> shapely.Polygon:
+        """Return a polygonal approximation of the disk.
+
+        Parameters
+        ----------
+        quad_segs : int, optional
+            Number of segments used to approximate a quarter circle, by
+            default ``64``.
+
+        Returns
+        -------
+        shapely.Polygon
+            Polygon inscribed in the disk.
+        """
+        return self.centroid.buffer(self.radius, quad_segs=quad_segs)
+
+
+Surface = Union[shapely.Polygon, shapely.MultiPolygon, Disk]
+
+
+def _distance_to_convex_rings(point: NDArrayFloat, rings: NDArrayFloat) -> NDArrayFloat:
+    """Distance from a single point to convex polygons, zero when inside.
+
+    Parameters
+    ----------
+    point : NDArrayFloat, shape (2,)
+        Query point.
+    rings : NDArrayFloat, shape (n_polygons, n_vertices, 2)
+        Open rings of convex polygons with counter-clockwise vertices.
+
+    Returns
+    -------
+    NDArrayFloat, shape (n_polygons,)
+        Distance from ``point`` to each polygon, ``0.0`` when the point
+        lies inside or on the boundary.
+    """
+    start = rings
+    edge = np.roll(rings, -1, axis=1) - rings
+    to_point = point[None, None, :] - start
+
+    # Parameter of the orthogonal projection on each edge, clamped to the
+    # segment so that the nearest point of the edge is obtained.
+    ratio = np.clip((to_point * edge).sum(-1) / (edge * edge).sum(-1), 0.0, 1.0)
+    nearest = start + ratio[..., None] * edge
+    distance = np.hypot(point[0] - nearest[..., 0], point[1] - nearest[..., 1]).min(
+        axis=1
+    )
+
+    # A counter-clockwise ring contains the point when it lies left of
+    # every edge, in which case the distance is zero.
+    side = edge[..., 0] * to_point[..., 1] - edge[..., 1] * to_point[..., 0]
+    return np.where((side >= 0.0).all(axis=1), 0.0, distance)
+
+
+def _disk_mask_from_rings(rings: NDArrayFloat, disk: Disk) -> NDArrayInt:
+    """Exact keep mask of convex tiles against a disk.
+
+    A tile is kept when its distance to the disk centre does not exceed the
+    radius.  Two circle tests settle every tile except those straddling the
+    rim: a tile whose centroid lies within ``radius - r_out`` is wholly
+    inside, and one beyond ``radius + r_out`` cannot touch, where ``r_out``
+    is the largest circumradius of the tiles.  Only the annulus in between,
+    which holds ``O(perimeter / edge_length)`` tiles, needs the exact
+    polygon distance.
+
+    Parameters
+    ----------
+    rings : NDArrayFloat, shape (n_tiles, n_vertices, 2)
+        Open rings of the candidate tiles.
+    disk : Disk
+        Disk to cover.
+
+    Returns
+    -------
+    np.ndarray of bool, shape (n_tiles,)
+        Mask of the tiles intersecting the disk.
+    """
+    mask = np.zeros(len(rings), dtype=bool)
+    if len(rings) == 0:
+        return mask
+
+    centroids = rings.mean(axis=1)
+    relative = rings - centroids[:, None, :]
+    r_out = float(np.hypot(relative[..., 0], relative[..., 1]).max())
+
+    centre = disk.as_array()
+    d2 = ((centroids - centre) ** 2).sum(axis=1)
+    r_in = max(disk.radius - r_out, 0.0)
+
+    inside = d2 <= r_in * r_in
+    band = ~inside & (d2 <= (disk.radius + r_out) ** 2)
+    mask |= inside
+
+    band_idx = np.flatnonzero(band)
+    if band_idx.size:
+        distance = _distance_to_convex_rings(centre, rings[band_idx])
+        mask[band_idx[distance <= disk.radius]] = True
+    return mask
+
+
+def _ragged_arange(counts: np.ndarray) -> np.ndarray:
+    """Concatenate ``arange(c)`` for every count ``c`` in *counts*.
+
+    Parameters
+    ----------
+    counts : np.ndarray, shape (n,)
+        Length of each run.
+
+    Returns
+    -------
+    np.ndarray, shape (counts.sum(),)
+        Within-run positions, i.e. ``[0..c0-1, 0..c1-1, ...]``.
+    """
+    total = int(counts.sum())
+    if total == 0:
+        return np.zeros(0, dtype=np.int64)
+    offsets = np.cumsum(counts) - counts
+    return np.arange(total, dtype=np.int64) - np.repeat(offsets, counts)
+
+
+def _pairs_to_adj(
+    src: np.ndarray, dst: np.ndarray, n_nodes: int
+) -> Dict[int, List[int]]:
+    """Group ``(src, dst)`` index pairs into an adjacency dictionary.
+
+    The pairs are encoded as single integers so that a single
+    :func:`numpy.unique` call sorts them lexicographically and removes
+    duplicates at once.  The resulting neighbour lists are therefore
+    sorted in ascending order and duplicate-free.
+
+    All destinations are converted to Python objects with one bulk
+    ``tolist`` call and the per-node lists are obtained by slicing that
+    flat list, which avoids both a per-edge ``append`` and the per-node
+    array views that :func:`numpy.split` would create.
+
+    Parameters
+    ----------
+    src, dst : np.ndarray, shape (n_edges,)
+        Compact source and destination indices of every edge.  Both must
+        lie in ``[0, n_nodes)``.
+    n_nodes : int
+        Total number of nodes.  Nodes without any edge are present in the
+        output with an empty neighbour list.
+
+    Returns
+    -------
+    Dict[int, List[int]]
+        Node index -> sorted list of neighbour indices.
+    """
+    if n_nodes == 0:
+        return {}
+    if len(src) == 0:
+        return {i: [] for i in range(n_nodes)}
+
+    # Encode each (src, dst) pair as a single integer and sort, which orders
+    # the edges by source and, within a source, by destination.  A plain sort
+    # is used rather than np.unique, whose hash-based path is an order of
+    # magnitude slower on this many keys; duplicates are then dropped in a
+    # single linear scan of the sorted array.
+    code = src.astype(np.int64, copy=False) * n_nodes + dst
+    code.sort()
+    code = code[np.concatenate(([True], np.diff(code) != 0))]
+    src_sorted, dst_sorted = np.divmod(code, n_nodes)
+
+    # Slice the sorted destinations into one contiguous run per source.
+    counts = np.bincount(src_sorted, minlength=n_nodes)
+    flat = dst_sorted.tolist()
+    ends = np.cumsum(counts).tolist()
+    adj = {}
+    start = 0
+    for node, end in enumerate(ends):
+        adj[node] = flat[start:end]
+        start = end
+    return adj
 
 
 def _lattice_centres(
@@ -40,7 +268,7 @@ def _lattice_centres(
         ``(x_min, y_min, x_max, y_max)`` of the surface to cover.
     b1, b2 : np.ndarray, shape (2,)
         Primitive lattice basis vectors (column and row directions,
-        including any stagger and anisotropy).
+        including any anisotropy).
     anchor : np.ndarray, shape (2,)
         A point that must be a lattice node (the alignment point, or a
         default such as the bbox corner).
@@ -80,6 +308,32 @@ def _lattice_centres(
         + b2[:, None, None] * jj[None, :, :]
     )
     return centres
+
+
+DEFAULT_ALIGNMENT_POINT: Tuple[float, float] = (0.0, 0.0)
+
+
+def _resolve_anchor(alignment_point: Optional[ArrayLike]) -> NDArrayFloat:
+    """Return the lattice anchor for an optional alignment point.
+
+    When no alignment point is given the world origin is used, which makes
+    the lattice phase absolute: it does not depend on the surface, so two
+    surfaces tiled with the same parameters produce mutually conforming
+    tilings, and editing, clipping or extending a surface shifts no tile.
+
+    Parameters
+    ----------
+    alignment_point : array-like of shape (2,), optional
+        ``(x, y)`` world-space coordinate that must be a lattice node.
+
+    Returns
+    -------
+    NDArrayFloat, shape (2,)
+        Anchor passed to :func:`_lattice_centres`.
+    """
+    if alignment_point is None:
+        return np.asarray(DEFAULT_ALIGNMENT_POINT, dtype=float)
+    return np.asarray(alignment_point, dtype=float).ravel()[:2]
 
 
 def _validate_inputs(edge_length: float, anisotropy_ratio: float) -> None:
@@ -194,10 +448,112 @@ def gen_polygon(
     raise ValueError(PolygonType(poly_type))
 
 
+def _reference_tile_vertices(
+    poly_type: PolygonType, edge_length: float, anisotropy_ratio: float
+) -> NDArrayFloat:
+    """Return the open ring of the reference tile centred on the origin.
+
+    The closing repeat of the exterior ring is dropped: ring closure is
+    handled by :func:`shapely.polygons`, so carrying the duplicate vertex
+    through the broadcasting step would only inflate the coordinate array.
+
+    Parameters
+    ----------
+    poly_type : PolygonType
+        Type of tile geometry.
+    edge_length : float
+        Base edge length of the tile.
+    anisotropy_ratio : float
+        Vertical anisotropy ratio of the tile.
+
+    Returns
+    -------
+    NDArrayFloat, shape (n_vertices, 2)
+        Vertex coordinates relative to the tile centre.
+    """
+    ring = np.asarray(
+        gen_polygon(poly_type, edge_length, anisotropy_ratio).exterior.coords,
+        dtype=float,
+    )
+    return ring[:-1]
+
+
+def _tiles_from_centres(
+    centres: NDArrayFloat,
+    verts: NDArrayFloat,
+    surface_to_cover: Surface,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Instantiate the tiles of a centre lattice that touch *surface_to_cover*.
+
+    The lattice is generated with a few extra rings of cells beyond the
+    surface bounding box, so a sizeable share of the centres cannot yield
+    an intersecting tile.  Those are discarded with a pure NumPy bounding
+    box test on the tile envelopes before any geometry is built, since
+    creating Shapely polygons and running the intersection predicate are
+    by far the most expensive steps.
+
+    When *surface_to_cover* is a :class:`Disk`, membership is decided
+    analytically by :func:`_disk_mask_from_rings` and no polygon is built
+    for a rejected tile.
+
+    Parameters
+    ----------
+    centres : NDArrayFloat, shape (2, nj, ni)
+        Tile centre coordinate meshes.
+    verts : NDArrayFloat, shape (n_vertices, 2)
+        Open ring of the reference tile, relative to its centre.
+    surface_to_cover : Surface
+        Surface the tiles must intersect to be kept.
+
+    Returns
+    -------
+    kept_polygons : np.ndarray of shapely.Polygon, shape (n_kept,)
+        Tiles intersecting the surface, in lattice order.
+    mask : np.ndarray of bool, shape (nj * ni,)
+        Keep mask over the full lattice, suitable for the structured
+        adjacency builders.
+    """
+    x_min, y_min, x_max, y_max = surface_to_cover.bounds
+
+    # Half-extent of the tile envelope, identical for every tile.
+    half_w = float(np.abs(verts[:, 0]).max())
+    half_h = float(np.abs(verts[:, 1]).max())
+
+    # Keep only the centres whose tile envelope overlaps the surface bbox.
+    cx, cy = centres
+    candidates = (
+        (cx + half_w >= x_min)
+        & (cx - half_w <= x_max)
+        & (cy + half_h >= y_min)
+        & (cy - half_h <= y_max)
+    ).ravel()
+
+    # Broadcast the reference vertices onto the candidate centres only.
+    centres_flat = np.moveaxis(centres, 0, -1).reshape(-1, 2)[candidates]
+    rings = centres_flat[:, None, :] + verts[None, :, :]
+
+    mask = np.zeros(candidates.size, dtype=bool)
+    if isinstance(surface_to_cover, Disk):
+        # Analytic membership: build only the tiles that are kept.
+        kept = _disk_mask_from_rings(rings, surface_to_cover)
+        mask[candidates] = kept
+        return shapely.polygons(rings[kept]), mask
+
+    polygons = shapely.polygons(rings)
+
+    # Scatter the predicate result back onto the full lattice.
+    mask[candidates] = intersects_mask(polygons, surface_to_cover)
+    return polygons[mask[candidates]], mask
+
+
 def _vectorized_grid_adjacency(
     n_rows: int, n_cols: int, mask: np.ndarray, offsets: np.ndarray
 ) -> Dict[int, List[int]]:
     """Vectorized adjacency builder for a uniform offset list.
+
+    Every offset contributes a batch of ``(source, destination)`` pairs.
+    The batches are concatenated and grouped once, so no Python-level work
+    is done per edge.
 
     Parameters
     ----------
@@ -212,14 +568,16 @@ def _vectorized_grid_adjacency(
     -------
     Dict[int, List[int]]
     """
-    mask2d = mask.reshape(n_rows, n_cols)
-    valid = np.flatnonzero(mask)
+    mask_flat = mask.ravel()
+    mask2d = mask_flat.reshape(n_rows, n_cols)
+    valid = np.flatnonzero(mask_flat)
     grid_to_compact = -np.ones(n_rows * n_cols, dtype=np.intp)
     grid_to_compact[valid] = np.arange(len(valid))
 
     r_valid, c_valid = np.where(mask2d)
 
-    adj: Dict[int, List[int]] = {i: [] for i in range(len(valid))}
+    src_parts: List[np.ndarray] = []
+    dst_parts: List[np.ndarray] = []
 
     for dr, dc in offsets:
         nr = r_valid + dr
@@ -227,28 +585,32 @@ def _vectorized_grid_adjacency(
         in_bounds = (nr >= 0) & (nr < n_rows) & (nc >= 0) & (nc < n_cols)
         src = r_valid[in_bounds] * n_cols + c_valid[in_bounds]
         dst = nr[in_bounds] * n_cols + nc[in_bounds]
-        valid_dst = mask.ravel()[dst]
-        src_compact = grid_to_compact[src[valid_dst]]
-        dst_compact = grid_to_compact[dst[valid_dst]]
-        for s, d in zip(src_compact, dst_compact):
-            adj[s].append(int(d))
+        valid_dst = mask_flat[dst]
+        src_parts.append(grid_to_compact[src[valid_dst]])
+        dst_parts.append(grid_to_compact[dst[valid_dst]])
 
-    return adj
+    return _pairs_to_adj(
+        np.concatenate(src_parts), np.concatenate(dst_parts), len(valid)
+    )
 
 
 def rectangular_grid_adjacency_masked(
     n_rows: int, n_cols: int, mask: np.ndarray
 ) -> Dict[int, List[int]]:
     """
-    Build adjacency dictionary for a rectangular grid of polygons with a mask, including
-    diagonal neighbors.
+    Build adjacency dictionary for a rectangular grid of polygons with a mask.
 
     Note
     ----
     Only polygons where mask == True are included. Indices are compact:
     0 ... n_valid-1 for valid polygons.
 
-    Neighbors are 8-connected (vertical, horizontal, and diagonal).
+    Neighbors are 4-connected (vertical and horizontal only): two rectangles
+    are adjacent only when they share a full edge. Diagonal cells, which
+    touch at a single corner, are not included since a shared vertex alone
+    does not make two tiles adjacent.
+
+    Neighbour lists are sorted in ascending order and duplicate-free.
 
     Parameters
     ----------
@@ -266,41 +628,14 @@ def rectangular_grid_adjacency_masked(
         indices.
     """
     offsets = np.array(
-        [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)],
+        [(-1, 0), (1, 0), (0, -1), (0, 1)],
         dtype=int,
     )
     return _vectorized_grid_adjacency(n_rows, n_cols, mask, offsets)
 
 
-def _get_non_aligned_rect_centers(
-    x_min: float, x_max: float, y_min: float, y_max: float, h_step: float, v_step: float
-) -> NDArrayFloat:
-
-    # number of columns of polygons
-    nh: int = math.ceil((x_max - x_min) / h_step)
-    # number of rows of polygons
-    nv = math.ceil((y_max - y_min) / v_step)
-
-    # compute the difference between the x coverage of the polygons and the required
-    #  x, y range
-    x_delta = nh * h_step - (x_max - x_min)
-    y_delta = nv * v_step - (y_max - y_min)
-
-    # compute the grid start
-    h_start = x_min - x_delta / 2.0
-    v_start = y_min - y_delta / 2.0
-
-    # compute the polygon centers
-    return np.array(
-        np.meshgrid(
-            np.linspace(h_start + h_step / 2.0, h_start + (nh - 0.5) * h_step, nh),
-            np.linspace(v_start + v_step / 2.0, v_start + (nv - 0.5) * v_step, nv),
-        )
-    )
-
-
 def gen_rectangular_tiling(
-    surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
+    surface_to_cover: Surface,
     edge_length: float,
     anisotropy_ratio: float = 1.0,
     alignment_point: Optional[ArrayLike] = None,
@@ -310,7 +645,7 @@ def gen_rectangular_tiling(
 
     Parameters
     ----------
-    surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon]
+    surface_to_cover : Surface
         Surface to cover with the tiling. Only the polygon intersecting this surface
         are kept.
     edge_length: float = 1.0
@@ -335,60 +670,50 @@ def gen_rectangular_tiling(
     """
     _validate_inputs(edge_length, anisotropy_ratio)
 
-    # extract the coordinates of the bounding box
-    x_min, y_min, x_max, y_max = surface_to_cover.bounds
-
     v_step = edge_length * anisotropy_ratio  #  Vertical step (height of a hexagon)
     h_step = edge_length  # Horizontal step (width of a hexagon)
 
-    if alignment_point is None:
-        centers = _get_non_aligned_rect_centers(
-            x_min=x_min,
-            x_max=x_max,
-            y_min=y_min,
-            y_max=y_max,
-            h_step=h_step,
-            v_step=v_step,
-        )
-    else:
-        b1 = np.array([h_step, 0.0])
-        b2 = np.array([0.0, v_step])
-        anchor = (
-            np.asarray(alignment_point, dtype=float).ravel()[:2]
-            if alignment_point is not None
-            else np.array([x_min, y_min])
-        )
-        centers = _lattice_centres(surface_to_cover.bounds, b1, b2, anchor)
-
-    verts = np.array(
-        gen_polygon(
-            PolygonType.RECTANGLE, edge_length, anisotropy_ratio
-        ).exterior.coords
+    b1 = np.array([h_step, 0.0])
+    b2 = np.array([0.0, v_step])
+    centers = _lattice_centres(
+        surface_to_cover.bounds, b1, b2, _resolve_anchor(alignment_point)
     )
-    # Broadcast vertices and create polygons (flatten)
-    polygons = shapely.polygons(
-        np.moveaxis(centers, 0, -1)[..., None, :] + verts[None, None, :, :]
-    ).ravel()
 
-    # Mask intersecting polygons (to keep)
-    mask = intersects_mask(polygons, surface_to_cover)
+    verts = _reference_tile_vertices(
+        PolygonType.RECTANGLE, edge_length, anisotropy_ratio
+    )
+
+    # Build the tiles intersecting the surface, with the keep mask over the
+    # full lattice.
+    kept_polygons, mask = _tiles_from_centres(centers, verts, surface_to_cover)
+
     # Adjacency of kept polygons
     adjacency_dict = rectangular_grid_adjacency_masked(
         centers.shape[1], centers.shape[2], mask
     )
-    return shapely.MultiPolygon(polygons[mask]), adjacency_dict
+    # shapely.multipolygons builds the collection in C; the MultiPolygon
+    # constructor walks the sequence and runs a Python-level emptiness check
+    # on every member.
+    return shapely.multipolygons(kept_polygons), adjacency_dict
 
 
 def hexagonal_grid_adjacency_masked(
-    nv: int, nh: int, mask: np.ndarray
+    nv: int,
+    nh: int,
+    mask: np.ndarray,
 ) -> Dict[int, List[int]]:
     """
     Build adjacency dictionary for a hexagonal grid of polygons with a mask.
+
+    Two column layouts produce a hexagonal tiling and they do not share the
+    same index topology:
 
     Note
     ----
     Only polygons where mask == True are included. Indices are compact:
     0 ... n_valid-1 for valid polygons.
+
+    Neighbour lists are sorted in ascending order and duplicate-free.
 
     Parameters
     ----------
@@ -405,88 +730,13 @@ def hexagonal_grid_adjacency_masked(
         Dictionary mapping each valid polygon's compact index to a list of neighbor
         indices.
     """
-
-    # reshape mask to 2D
-    mask2d = mask.reshape(nv, nh)
-
-    # mapping from full grid index to compact index
-    valid = np.flatnonzero(mask)
-    grid_to_compact = -np.ones(nv * nh, dtype=np.intp)
-    grid_to_compact[valid] = np.arange(len(valid))
-
-    adj: Dict[int, List[int]] = {i: [] for i in range(len(valid))}
-
-    # shifted columns are 0,2,4,...  (c % 2 == 0)
-    # neighbor offsets for "down-shifted columns"
-    # remove (-1, -1) and (-1, 1)
-    shifted_offsets = [(-1, 0), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-    # remove (1, 1) and (1, -1)
-    normal_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0)]
-
-    r_valid, c_valid = np.where(mask2d)
-
-    # Vectorized: process each offset once over all valid cells, split by parity
-    even_col = c_valid % 2 == 0
-    odd_col = ~even_col
-
-    for dr, dc in set(shifted_offsets + normal_offsets):
-        # Determine which cells use this offset
-        is_shifted = (dr, dc) in shifted_offsets
-        is_normal = (dr, dc) in normal_offsets
-        use = np.zeros(len(r_valid), dtype=bool)
-        if is_shifted:
-            use |= even_col
-        if is_normal:
-            use |= odd_col
-
-        nr = r_valid[use] + dr
-        nc = c_valid[use] + dc
-        in_bounds = (nr >= 0) & (nr < nv) & (nc >= 0) & (nc < nh)
-        src = r_valid[use][in_bounds] * nh + c_valid[use][in_bounds]
-        dst = nr[in_bounds] * nh + nc[in_bounds]
-        valid_dst = mask.ravel()[dst]
-        src_compact = grid_to_compact[src[valid_dst]]
-        dst_compact = grid_to_compact[dst[valid_dst]]
-        for s, d in zip(src_compact, dst_compact):
-            adj[s].append(int(d))
-
-    return adj
-
-
-def _get_non_aligned_hex_centers(
-    x_min: float, x_max: float, y_min: float, y_max: float, h_step: float, v_step: float
-) -> NDArrayFloat:
-
-    # number of columns of polygons
-    nh: int = math.ceil((x_max - x_min) / h_step)
-    # number of rows of polygons
-    nv = math.ceil((y_max - y_min) / v_step) + 1
-
-    # compute the difference between the x coverage of the polygons and the required
-    # x, y range
-    x_delta = nh * h_step - (x_max - x_min)
-    y_delta = nv * v_step - (y_max - y_min)
-
-    # compute the grid start
-    h_start = x_min - x_delta / 2.0
-    v_start = y_min - y_delta / 2.0
-
-    # compute the polygon centers
-    centers = np.array(
-        np.meshgrid(
-            np.linspace(h_start + h_step / 2.0, h_start + (nh - 0.5) * h_step, nh),
-            np.linspace(v_start + v_step / 2.0, v_start + (nv - 0.5) * v_step, nv),
-        )
-    )
-
-    # shift half of the columns down
-    centers[1, :, ::2] += v_step / 2.0
-
-    return centers
+    # Sheared lattice: the six neighbour offsets are the same everywhere.
+    offsets = np.array([(0, -1), (0, 1), (-1, 0), (1, 0), (1, 1), (-1, -1)], dtype=int)
+    return _vectorized_grid_adjacency(nv, nh, mask, offsets)
 
 
 def gen_hexagonal_tiling(
-    surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
+    surface_to_cover: Surface,
     edge_length: float,
     anisotropy_ratio: float = 1.0,
     alignment_point: Optional[ArrayLike] = None,
@@ -496,7 +746,7 @@ def gen_hexagonal_tiling(
 
     Parameters
     ----------
-    surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon]
+    surface_to_cover : Surface
         Surface to cover with the tiling. Only the polygon intersecting this surface
         are kept.
     edge_length: float = 1.0
@@ -521,55 +771,37 @@ def gen_hexagonal_tiling(
     """
     _validate_inputs(edge_length, anisotropy_ratio)
 
-    # extract the coordinates of the bounding box
-    x_min, y_min, x_max, y_max = surface_to_cover.bounds
-
     # Calculate the vertical and horizontal step distances between centers of hexagons
     v_step = (
         math.sqrt(3) * edge_length * anisotropy_ratio
     )  #  Vertical step (height of a hexagon)
     h_step = 1.5 * edge_length  # Horizontal step (width of a hexagon)
 
-    if alignment_point is None:
-        centers = _get_non_aligned_hex_centers(
-            x_min=x_min,
-            x_max=x_max,
-            y_min=y_min,
-            y_max=y_max,
-            h_step=h_step,
-            v_step=v_step,
-        )
-    else:
-        # even columns shifted up by v_step/2 → b1 carries the -v_step/2 stagger
-        b1 = np.array([h_step, -v_step / 2.0])
-        b2 = np.array([0.0, v_step])
-
-        anchor = (
-            np.asarray(alignment_point, dtype=float).ravel()[:2]
-            if alignment_point is not None
-            else np.array([x_min, y_min])
-        )
-        centers = _lattice_centres(surface_to_cover.bounds, b1, b2, anchor)
-
-    # vertices for one polygon
-    verts = np.array(
-        gen_polygon(PolygonType.HEXAGON, edge_length, anisotropy_ratio).exterior.coords
+    # The column vector carries the half-step stagger, so the lattice is
+    # sheared rather than parity-staggered and every cell has the same six
+    # neighbour offsets.
+    b1 = np.array([h_step, -v_step / 2.0])
+    b2 = np.array([0.0, v_step])
+    centers = _lattice_centres(
+        surface_to_cover.bounds, b1, b2, _resolve_anchor(alignment_point)
     )
 
-    # Broadcast vertices and create polygons (flatten)
-    polygons = shapely.polygons(
-        np.moveaxis(centers, 0, -1)[..., None, :] + verts[None, None, :, :]
-    ).ravel()
+    # vertices for one polygon
+    verts = _reference_tile_vertices(PolygonType.HEXAGON, edge_length, anisotropy_ratio)
 
-    # Mask intersecting polygons (to keep)
-    mask = intersects_mask(polygons, surface_to_cover)
+    # Build the tiles intersecting the surface, with the keep mask over the
+    # full lattice.
+    kept_polygons, mask = _tiles_from_centres(centers, verts, surface_to_cover)
 
     # Adjacency of kept polygons
     adjacency_dict = hexagonal_grid_adjacency_masked(
-        centers.shape[1], centers.shape[2], mask
+        centers.shape[1],
+        centers.shape[2],
+        mask,
     )
 
-    return shapely.MultiPolygon(polygons[mask]), adjacency_dict
+    # Built in C rather than through the per-member MultiPolygon constructor.
+    return shapely.multipolygons(kept_polygons), adjacency_dict
 
 
 def extract_tiling_centers(
@@ -607,9 +839,15 @@ def extract_tiling_vertices(
     Vertices shared between adjacent polygons (identical coordinates up to
     ``n_decimals`` decimal places) are merged into a single entry.  The
     closing repeat of each exterior ring is dropped before deduplication.
-    Both adjacency mappings are built in a single pass over the same
+    Both adjacency mappings are built from the same
     ``(cluster_indices, poly_indices)`` arrays so ``shapely.get_rings`` is
     called only once.
+
+    Deduplication is performed on a single integer key per vertex, obtained
+    by scaling the rounded coordinates and packing ``(x, y)`` into one
+    ``int64``.  Sorting integers is markedly cheaper than sorting the void
+    dtype of a structured array, and the resulting order is the same
+    lexicographic ``(x, y)`` order.
 
     Parameters
     ----------
@@ -623,10 +861,9 @@ def extract_tiling_vertices(
     -------
     unique_coords : NDArrayFloat, shape (n_verts, 2)
         Coordinates of the ``n_verts`` deduplicated vertices, in
-        lexicographic ``(x, y)`` order (as established by
-        :func:`numpy.unique`).
+        lexicographic ``(x, y)`` order.
     vert_to_polys : Dict[int, List[int]]
-        Deduplicated vertex id → list of polygon ids that share it.
+        Deduplicated vertex id → sorted list of polygon ids that share it.
         Interior vertices shared by several polygons have lists with more
         than one entry; boundary vertices have exactly one.
     cluster_indices : NDArrayInt, shape (n_input_verts,)
@@ -648,31 +885,37 @@ def extract_tiling_vertices(
     # drop closing repeat (last vertex of every ring)
     drop = np.zeros(len(all_coords), dtype=bool)
     drop[np.cumsum(n_per_ring) - 1] = True
-    coords = np.round(all_coords[~drop], decimals=n_decimals)
+    coords = all_coords[~drop]
     poly_indices = poly_indices[~drop]
 
-    # deduplicate via structured array
-    dt = np.dtype([("x", coords.dtype), ("y", coords.dtype)])
-    structured = np.empty(len(coords), dtype=dt)
-    structured["x"] = coords[:, 0]  # ty:ignore[invalid-assignment]
-    structured["y"] = coords[:, 1]  # ty:ignore[invalid-assignment]
-    unique_structured, inverse = np.unique(structured, return_inverse=True)
-    cluster_indices = inverse.astype(np.int64)
-    unique_coords = np.column_stack([unique_structured["x"], unique_structured["y"]])  # ty:ignore[invalid-argument-type]
+    # quantise the coordinates on the rounding grid, shifted to non-negative
+    # values so the packing below is monotonic in x then y
+    key = np.rint(coords * 10.0**n_decimals).astype(np.int64)
+    key -= key.min(axis=0)
 
-    # build both adjacency dicts in one pass
-    vert_to_polys: Dict[int, List[int]] = defaultdict(list)
-    poly_to_verts: Dict[int, List[int]] = defaultdict(list)
-    for vert_idx, poly_id in zip(cluster_indices, poly_indices):
-        vi, pi = int(vert_idx), int(poly_id)
-        vert_to_polys[vi].append(pi)
-        poly_to_verts[pi].append(vi)
+    # pack (x, y) into a single integer and deduplicate
+    stride = int(key[:, 1].max()) + 1
+    code = key[:, 0] * stride + key[:, 1]
+    _, first, inverse = np.unique(code, return_index=True, return_inverse=True)
+    cluster_indices = inverse.ravel().astype(np.int64)
+    unique_coords = np.round(coords[first], decimals=n_decimals)
+
+    # vertex → polygons, grouped in a single pass
+    vert_to_polys = _pairs_to_adj(cluster_indices, poly_indices, len(unique_coords))
+
+    # polygon → vertices, kept in ring order by slicing the input-ordered
+    # cluster indices at the polygon boundaries
+    n_per_poly = np.bincount(poly_indices, minlength=len(geom_array))
+    poly_to_verts = {
+        i: group.tolist()
+        for i, group in enumerate(np.split(cluster_indices, np.cumsum(n_per_poly)[:-1]))
+    }
 
     return (
         unique_coords,
-        dict(vert_to_polys),
+        vert_to_polys,
         cluster_indices,
-        dict(poly_to_verts),
+        poly_to_verts,
     )
 
 
@@ -682,6 +925,17 @@ def adjacency_by_shared_vertices(
     """
     Compute adjacency dictionary based on polygons sharing vertices.
 
+    All ``(polygon, polygon)`` pairs sharing a vertex are expanded at once
+    with a ragged-index gather over the vertex groups, so the cost per
+    shared vertex stays in NumPy rather than in a Python set update.
+
+    Note
+    ----
+    This is vertex-based adjacency: two polygons that touch only at a
+    single corner (no shared edge) are still considered neighbours here.
+    For strict edge-sharing adjacency use the structured
+    ``*_grid_adjacency_masked`` builders instead.
+
     Parameters
     ----------
     polygons : list of shapely.Polygon
@@ -690,22 +944,41 @@ def adjacency_by_shared_vertices(
     Returns
     -------
     adj : dict[int, list[int]]
-        Dictionary mapping polygon index to a list of neighboring polygon indices
-        (sharing at least one vertex).
+        Dictionary mapping polygon index to a sorted list of neighboring polygon
+        indices (sharing at least one vertex).  Polygons without any neighbour
+        map to an empty list.
     """
-    verts, vert_to_polys, _, _ = extract_tiling_vertices(polygons)
+    _, _, cluster_indices, poly_to_verts = extract_tiling_vertices(polygons)
+    n_polys = len(poly_to_verts)
 
-    # Build adjacency dict
-    adj = defaultdict(set)
-    for shared_polys in vert_to_polys.values():
-        if len(shared_polys) < 2:
-            continue
-        sp = np.array(shared_polys)
-        for i in sp:
-            adj[i].update(sp[sp != i])
+    # polygon id of every input vertex, aligned with cluster_indices
+    n_per_poly = np.fromiter(
+        (len(v) for v in poly_to_verts.values()), dtype=np.int64, count=n_polys
+    )
+    poly_ids = np.repeat(
+        np.fromiter(poly_to_verts.keys(), dtype=np.int64, count=n_polys), n_per_poly
+    )
 
-    # Convert sets to sorted lists
-    return {i: sorted(list(neigh)) for i, neigh in adj.items()}
+    # sort the (vertex, polygon) pairs so that polygons sharing a vertex form
+    # contiguous runs
+    order = np.argsort(cluster_indices, kind="stable")
+    sorted_clusters = cluster_indices[order]
+    sorted_polys = poly_ids[order]
+
+    # start and size of the run each element belongs to
+    counts = np.bincount(sorted_clusters)
+    starts = np.cumsum(counts) - counts
+    run_size = counts[sorted_clusters]
+    run_start = starts[sorted_clusters]
+
+    # cartesian product within every run: each element is paired with the
+    # whole run it belongs to
+    src = np.repeat(sorted_polys, run_size)
+    dst = sorted_polys[np.repeat(run_start, run_size) + _ragged_arange(run_size)]
+
+    # drop the self-pairs introduced by the cartesian product
+    keep = src != dst
+    return _pairs_to_adj(src[keep], dst[keep], n_polys)
 
 
 def triangular_grid_adjacency_masked(
@@ -717,10 +990,12 @@ def triangular_grid_adjacency_masked(
 
     Each lattice cell ``(j, i)`` produces two triangles stored at flat
     indices ``(j * ni + i) * 2 + k`` where *k* is 0 (lower-right) or
-    1 (upper-left).  Two triangles are neighbours when they share at
-    least one vertex.  The neighbour offsets are derived from the
-    vertex-lattice geometry and are constant for all cells of the same
-    parity *k*.
+    1 (upper-left).  Two triangles are neighbours only when they share a
+    full edge (i.e. two vertices), never when they merely touch at a
+    single lattice-node vertex.  Every triangle has exactly 3 edges, so
+    it has at most 3 edge-sharing neighbours.
+
+    Neighbour lists are sorted in ascending order and duplicate-free.
 
     Parameters
     ----------
@@ -736,67 +1011,49 @@ def triangular_grid_adjacency_masked(
     Dict[int, List[int]]
         Adjacency dictionary with compact (0-based) indices.
     """
+    mask_flat = mask.ravel()
     n_total = nj * ni * 2
-    valid = np.flatnonzero(mask)
+    valid = np.flatnonzero(mask_flat)
     grid_to_compact = -np.ones(n_total, dtype=np.intp)
     grid_to_compact[valid] = np.arange(len(valid))
 
-    adj: Dict[int, List[int]] = {i: [] for i in range(len(valid))}
-
     # Flat indices and decomposition into (j, i, k)
-    flat_valid = np.flatnonzero(mask)
+    flat_valid = valid
     k_valid = flat_valid % 2
     cell_valid = flat_valid // 2
     j_valid = cell_valid // ni
     i_valid = cell_valid % ni
 
     # Neighbour offsets as (dj, di, dk) relative to triangle (j, i, k).
-    # k=0 triangle (p, p+a, p+b): shares edges/vertices with its k=1 sibling
-    # and the k=1 triangles of adjacent cells.
-    # k=1 triangle (p+a, p+a+b, p+b): same logic mirrored.
+    # Cell (j, i) has vertices p = origin + i*a + j*b, p+a, p+b and p+a+b.
+    # The k=0 triangle is (p, p+a, p+b) and the k=1 triangle is
+    # (p+a, p+a+b, p+b), so the two share the diagonal edge (p+a, p+b).
     #
-    # For k=0, neighbours are:
-    #   same cell k=1           -> (0, 0, 1)
-    #   cell (j, i-1) k=1      -> (0, -1, 1)   shares edge p, p+b
-    #   cell (j-1, i) k=1      -> (-1, 0, 1)   shares edge p, p+a (via row below)
-    #   cell (j, i+1) k=0      -> (0, 1, 0)    shares vertex p+a
-    #   cell (j, i-1) k=0      -> (0, -1, 0)   shares vertex p
-    #   cell (j+1, i) k=0      -> (1, 0, 0)    shares vertex p+b
-    #   cell (j-1, i) k=0      -> (-1, 0, 0)   shares vertex p
-    #   cell (j+1, i-1) k=1    -> (1, -1, 1)   shares vertex p+b
-    #   cell (j-1, i+1) k=1    -> (-1, 1, 1)   shares vertex p+a
-    #   cell (j+1, i) k=1      -> (1, 0, 1)    shares vertex p+b
-    #   cell (j-1, i+1) k=0    -> (-1, 1, 0)   shares vertex p+a
-    #   cell (j+1, i-1) k=0    -> (1, -1, 0)   shares vertex p+b (via b offset)
+    # Each triangle has exactly 3 edges, hence at most 3 edge-sharing
+    # neighbours (vertex-only touches are intentionally excluded):
+    #
+    #   k=0 triangle (p, p+a, p+b):
+    #     edge (p+a, p+b) -> diagonal, shared with (j,   i,   k=1)
+    #     edge (p,   p+a) -> shared with              (j-1, i,   k=1)
+    #     edge (p,   p+b) -> shared with              (j,   i-1, k=1)
+    #
+    #   k=1 triangle (p+a, p+a+b, p+b):
+    #     edge (p+a, p+b)   -> diagonal, shared with (j,   i,   k=0)
+    #     edge (p+a, p+a+b) -> shared with            (j,   i+1, k=0)
+    #     edge (p+a+b, p+b) -> shared with            (j+1, i,   k=0)
     offsets_k0 = [
         (0, 0, 1),
-        (0, -1, 1),
         (-1, 0, 1),
-        (0, 1, 0),
-        (0, -1, 0),
-        (1, 0, 0),
-        (-1, 0, 0),
-        (1, -1, 1),
-        (-1, 1, 1),
-        (1, 0, 1),
-        (-1, 1, 0),
-        (1, -1, 0),
+        (0, -1, 1),
     ]
-    # For k=1, the offsets are the negation of the k=0 perspective
     offsets_k1 = [
         (0, 0, 0),
         (0, 1, 0),
         (1, 0, 0),
-        (0, -1, 1),
-        (0, 1, 1),
-        (-1, 0, 1),
-        (1, 0, 1),
-        (-1, 1, 0),
-        (1, -1, 0),
-        (-1, 0, 0),
-        (1, -1, 1),
-        (-1, 1, 1),
     ]
+
+    src_parts: List[np.ndarray] = []
+    dst_parts: List[np.ndarray] = []
 
     for k_src, offsets in [(0, offsets_k0), (1, offsets_k1)]:
         sel = k_valid == k_src
@@ -810,37 +1067,73 @@ def triangular_grid_adjacency_masked(
             in_bounds = (nj_idx >= 0) & (nj_idx < nj) & (ni_idx >= 0) & (ni_idx < ni)
             dst_flat = (nj_idx[in_bounds] * ni + ni_idx[in_bounds]) * 2 + dk
             src_flat = flat_sel[in_bounds]
-            valid_dst = mask[dst_flat]
-            src_compact = grid_to_compact[src_flat[valid_dst]]
-            dst_compact = grid_to_compact[dst_flat[valid_dst]]
-            for s, d in zip(src_compact, dst_compact):
-                adj[s].append(int(d))
+            valid_dst = mask_flat[dst_flat]
+            src_parts.append(grid_to_compact[src_flat[valid_dst]])
+            dst_parts.append(grid_to_compact[dst_flat[valid_dst]])
 
-    # Deduplicate neighbour lists
-    return {k: sorted(set(v)) for k, v in adj.items()}
+    # Group every (source, destination) pair in a single pass; the encoding
+    # used there already yields sorted, duplicate-free neighbour lists.
+    return _pairs_to_adj(
+        np.concatenate(src_parts), np.concatenate(dst_parts), len(valid)
+    )
 
 
 def intersects_mask(
     polygons: np.ndarray,
-    surface: Union[shapely.Polygon, shapely.MultiPolygon],
+    surface: Surface,
 ) -> np.ndarray:
     """Return a boolean mask of polygons intersecting *surface*.
 
-    For simple surfaces the vectorized ``shapely.intersects`` is used
+    When *surface* is a :class:`Disk`, membership is decided analytically
+    against the exact circle and no geometric predicate is evaluated.
+
+    Otherwise the surface is prepared first: this builds an index over its
+    edges once and reuses it for every tile, instead of re-walking the
+    boundary at each predicate evaluation.
+
+    For simple surfaces the vectorized ``shapely.intersects`` is then used
     directly.  For complex multi-part surfaces an STRtree spatial index
-    is built to avoid O(n) pairwise checks.
+    is built to avoid O(n) pairwise checks, and the query is issued with
+    the individual parts rather than the multipolygon, whose overall
+    envelope carries little information when the parts are far apart.
+
+    Parameters
+    ----------
+    polygons : np.ndarray of shapely.Polygon, shape (n_polygons,)
+        Candidate tiles. When *surface* is a :class:`Disk` they must be
+        convex, which every tile produced by this module is.
+    surface : Surface
+        Surface the polygons must intersect.
+
+    Returns
+    -------
+    np.ndarray of bool, shape (n_polygons,)
+        Mask of the polygons intersecting *surface*.
     """
+    if len(polygons) == 0:
+        return np.zeros(0, dtype=bool)
+
+    if isinstance(surface, Disk):
+        coords, index = shapely.get_coordinates(polygons, return_index=True)
+        n_vertices = np.bincount(index)[0] - 1
+        rings = coords.reshape(len(polygons), n_vertices + 1, 2)[:, :-1, :]
+        return _disk_mask_from_rings(rings, surface)
+
     if isinstance(surface, shapely.MultiPolygon) and len(surface.geoms) > 8:
+        parts = np.asarray(surface.geoms)
+        shapely.prepare(parts)
         tree = shapely.STRtree(polygons)
-        hit = tree.query(surface, predicate="intersects")
+        hit = tree.query(parts, predicate="intersects")[1]
         mask = np.zeros(len(polygons), dtype=bool)
         mask[hit] = True
         return mask
+
+    shapely.prepare(surface)
     return shapely.intersects(polygons, surface)
 
 
 def gen_triangular_tiling(
-    surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
+    surface_to_cover: Surface,
     edge_length: float,
     anisotropy_ratio: float = 1.0,
     alignment_point: Optional[ArrayLike] = None,
@@ -871,7 +1164,7 @@ def gen_triangular_tiling(
 
     Parameters
     ----------
-    surface_to_cover : Union[shapely.Polygon, shapely.MultiPolygon]
+    surface_to_cover : Surface
         Surface to cover with triangular tiles. Only triangles intersecting this
         surface are kept in the returned tiling.
     edge_length : float
@@ -893,8 +1186,7 @@ def gen_triangular_tiling(
         - A :class:`shapely.MultiPolygon` with all triangles intersecting
           ``surface_to_cover``.
         - An adjacency dictionary mapping each kept triangle index to the list
-          of neighbouring kept triangle indices sharing at least one rounded
-          vertex.
+          of neighbouring kept triangle indices sharing a full edge.
 
     Raises
     ------
@@ -912,9 +1204,6 @@ def gen_triangular_tiling(
     """
     _validate_inputs(edge_length, anisotropy_ratio)
 
-    # Extract the bounding box of the surface to cover.
-    x_min, y_min, x_max, y_max = surface_to_cover.bounds
-
     # Store the horizontal edge length using a short geometric name.
     h = float(edge_length)
 
@@ -928,11 +1217,7 @@ def gen_triangular_tiling(
     b = np.array([h / 2.0, v], dtype=float)
 
     # Select the triangle centroid that should be aligned with the lattice.
-    aligned_centroid = (
-        np.asarray(alignment_point, dtype=float).ravel()[:2]
-        if alignment_point is not None
-        else np.array([x_min, y_min], dtype=float)
-    )
+    aligned_centroid = _resolve_anchor(alignment_point)
 
     # The centroid of triangle (p, p + a, p + b) is p + (a + b) / 3.
     # Therefore, choose the lattice vertex origin p so that this centroid
@@ -978,31 +1263,48 @@ def gen_triangular_tiling(
     # This triangle exactly shares the diagonal edge (p + a, p + b).
     tri_b_coords = np.stack([p10, p11, p01], axis=2)
 
-    # Convert the first triangle coordinate arrays into Shapely polygons.
-    tri_a = shapely.polygons(tri_a_coords)
-
-    # Convert the second triangle coordinate arrays into Shapely polygons.
-    tri_b = shapely.polygons(tri_b_coords)
-
-    # Stack both triangles per cell and flatten to 1-D.
+    # Interleave both triangles per cell and flatten to a coordinate array.
     # Layout: flat index = (j * ni + i) * 2 + k, with k=0 for tri_a, k=1 for tri_b.
-    polygons = np.stack([tri_a, tri_b], axis=-1).ravel()
+    tri_coords = np.stack([tri_a_coords, tri_b_coords], axis=2).reshape(-1, 3, 2)
 
-    # Keep only triangles that intersect the requested surface.
-    mask = intersects_mask(polygons, surface_to_cover)
+    # Discard the triangles whose bounding box misses the surface bounding box
+    # before building any geometry, since polygon creation and the intersection
+    # predicate dominate the cost.
+    x_min, y_min, x_max, y_max = surface_to_cover.bounds
+    lo = tri_coords.min(axis=1)
+    hi = tri_coords.max(axis=1)
+    candidates = (
+        (hi[:, 0] >= x_min)
+        & (lo[:, 0] <= x_max)
+        & (hi[:, 1] >= y_min)
+        & (lo[:, 1] <= y_max)
+    )
 
-    # Extract the triangles that actually cover or touch the surface.
-    kept_polygons = polygons[mask]
+    mask = np.zeros(candidates.size, dtype=bool)
+    if isinstance(surface_to_cover, Disk):
+        # Analytic membership: build only the triangles that are kept.
+        kept = _disk_mask_from_rings(tri_coords[candidates], surface_to_cover)
+        mask[candidates] = kept
+        kept_polygons = shapely.polygons(tri_coords[candidates][kept])
+    else:
+        # Convert the candidate triangle coordinate arrays into Shapely
+        # polygons, then keep those intersecting the requested surface and
+        # scatter the result back onto the full lattice for the adjacency
+        # builder.
+        polygons = shapely.polygons(tri_coords[candidates])
+        mask[candidates] = intersects_mask(polygons, surface_to_cover)
+        kept_polygons = polygons[mask[candidates]]
 
     # Compute adjacency from the structured grid topology.
     adjacency_dict = triangular_grid_adjacency_masked(nj, ni, mask)
 
     # Return the final tiling and its adjacency dictionary.
-    return shapely.MultiPolygon(kept_polygons), adjacency_dict
+    # Built in C rather than through the per-member MultiPolygon constructor.
+    return shapely.multipolygons(kept_polygons), adjacency_dict
 
 
 def gen_polygonal_tiling(
-    surface_to_cover: Union[shapely.Polygon, shapely.MultiPolygon],
+    surface_to_cover: Surface,
     poly_type: PolygonType,
     edge_length: float,
     anisotropy_ratio: float = 1.0,
@@ -1018,7 +1320,7 @@ def gen_polygonal_tiling(
 
     Parameters
     ----------
-    surface_to_cover : shapely.Polygon or shapely.MultiPolygon
+    surface_to_cover : Surface
         Surface to cover with the tiling.  Only tiles whose footprint
         intersects this surface are kept in the output.
     poly_type : PolygonType
@@ -1062,12 +1364,18 @@ def gen_polygonal_tiling(
     generates the axis-aligned tiling, then re-rotates the result by
     ``+rot_deg`` so that the output tiles are in world-space coordinates.
     """
-    rot_surface_to_cover = shapely.affinity.rotate(
-        surface_to_cover,
-        angle=-rot_deg,
-        use_radians=False,
-        origin=surface_to_cover.centroid,
-    )
+    origin = surface_to_cover.centroid
+    if isinstance(surface_to_cover, Disk):
+        # A disk is invariant under rotation about its own centre, which is
+        # exactly the origin used here, so the round-trip is skipped.
+        rot_surface_to_cover: Surface = surface_to_cover
+    else:
+        rot_surface_to_cover = shapely.affinity.rotate(
+            surface_to_cover,
+            angle=-rot_deg,
+            use_radians=False,
+            origin=origin,
+        )
 
     rot_alignment_point = alignment_point
     if alignment_point is not None and rot_deg != 0.0:
@@ -1076,7 +1384,7 @@ def gen_polygonal_tiling(
                 shapely.Point(alignment_point),
                 angle=-rot_deg,
                 use_radians=False,
-                origin=surface_to_cover.centroid,
+                origin=origin,
             ).xy
         ).ravel()
 
@@ -1109,13 +1417,13 @@ def gen_polygonal_tiling(
 
     # Batch-rotate all polygon coordinates via shapely.get_coordinates /
     # shapely.set_coordinates instead of per-polygon Python loops.
-    origin = np.array(surface_to_cover.centroid.coords[0])
+    origin_xy = np.array(origin.coords[0])
     theta = np.radians(rot_deg)
     c, s = np.cos(theta), np.sin(theta)
     R = np.array([[c, -s], [s, c]])
 
     geom_array = np.array(list(_grid.geoms))
     coords = shapely.get_coordinates(geom_array)
-    rotated_coords = (coords - origin) @ R.T + origin
+    rotated_coords = (coords - origin_xy) @ R.T + origin_xy
     rotated_geoms = shapely.set_coordinates(geom_array.copy(), rotated_coords)
-    return shapely.MultiPolygon(rotated_geoms), _adj
+    return shapely.multipolygons(rotated_geoms), _adj

@@ -26,6 +26,7 @@ Utilities for creating base polygons and describing supported tile types.
 
    PolygonType
    gen_polygon
+   Disk
 
 Tiling functions
 ^^^^^^^^^^^^^^^^
@@ -131,6 +132,7 @@ from quickpaver._grid import (
 )
 from quickpaver._plot import adjacency_to_edges, draw_adjacency
 from quickpaver._tiling import (
+    Disk,
     PolygonType,
     adjacency_by_shared_vertices,
     extract_tiling_centers,
@@ -157,6 +159,7 @@ __all__ = [
     "__email__",
     "__version__",
     "PolygonType",
+    "Disk",
     "gen_hexagonal_tiling",
     "gen_polygon",
     "gen_rectangular_tiling",
