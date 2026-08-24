@@ -196,7 +196,7 @@ def _as_full_slice_tuple(
         return None
     if not all(isinstance(s, slice) for s in span):
         return None
-    return span  # ty:ignore[invalid-return-type]
+    return span
 
 
 def span_to_node_numbers_2d(

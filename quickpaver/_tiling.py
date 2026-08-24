@@ -14,7 +14,7 @@ import shapely
 import shapely.affinity
 from numpy.typing import ArrayLike
 
-from quickpaver._types import NDArrayFloat, NDArrayInt, StrEnum
+from quickpaver._types import NDArrayBool, NDArrayFloat, NDArrayInt, StrEnum
 
 SQRT3 = math.sqrt(3)
 
@@ -144,7 +144,7 @@ def _disk_mask_from_rings(rings: NDArrayFloat, disk: Disk) -> NDArrayInt:
 
     Returns
     -------
-    np.ndarray of bool, shape (n_tiles,)
+    NDArrayInt of bool, shape (n_tiles,)
         Mask of the tiles intersecting the disk.
     """
     mask = np.zeros(len(rings), dtype=bool)
@@ -170,17 +170,17 @@ def _disk_mask_from_rings(rings: NDArrayFloat, disk: Disk) -> NDArrayInt:
     return mask
 
 
-def _ragged_arange(counts: np.ndarray) -> np.ndarray:
+def _ragged_arange(counts: NDArrayInt) -> NDArrayInt:
     """Concatenate ``arange(c)`` for every count ``c`` in *counts*.
 
     Parameters
     ----------
-    counts : np.ndarray, shape (n,)
+    counts : NDArrayInt, shape (n,)
         Length of each run.
 
     Returns
     -------
-    np.ndarray, shape (counts.sum(),)
+    NDArrayInt, shape (counts.sum(),)
         Within-run positions, i.e. ``[0..c0-1, 0..c1-1, ...]``.
     """
     total = int(counts.sum())
@@ -191,7 +191,7 @@ def _ragged_arange(counts: np.ndarray) -> np.ndarray:
 
 
 def _pairs_to_adj(
-    src: np.ndarray, dst: np.ndarray, n_nodes: int
+    src: NDArrayInt, dst: NDArrayInt, n_nodes: int
 ) -> Dict[int, List[int]]:
     """Group ``(src, dst)`` index pairs into an adjacency dictionary.
 
@@ -207,7 +207,7 @@ def _pairs_to_adj(
 
     Parameters
     ----------
-    src, dst : np.ndarray, shape (n_edges,)
+    src, dst : NDArrayInt, shape (n_edges,)
         Compact source and destination indices of every edge.  Both must
         lie in ``[0, n_nodes)``.
     n_nodes : int
@@ -248,11 +248,11 @@ def _pairs_to_adj(
 
 def _lattice_centres(
     bounds: Tuple[float, float, float, float],
-    b1: np.ndarray,
-    b2: np.ndarray,
-    anchor: np.ndarray,
+    b1: NDArrayFloat,
+    b2: NDArrayFloat,
+    anchor: NDArrayFloat,
     margin: int = 2,
-) -> np.ndarray:
+) -> NDArrayFloat:
     """Generate centre coordinates of a Bravais lattice covering *bounds*.
 
     The lattice is ``anchor + i*b1 + j*b2`` for integers *i*, *j*.  The
@@ -266,10 +266,10 @@ def _lattice_centres(
     ----------
     bounds : tuple of (float, float, float, float)
         ``(x_min, y_min, x_max, y_max)`` of the surface to cover.
-    b1, b2 : np.ndarray, shape (2,)
+    b1, b2 : NDArrayFloat, shape (2,)
         Primitive lattice basis vectors (column and row directions,
         including any anisotropy).
-    anchor : np.ndarray, shape (2,)
+    anchor : NDArrayFloat, shape (2,)
         A point that must be a lattice node (the alignment point, or a
         default such as the bbox corner).
     margin : int
@@ -278,7 +278,7 @@ def _lattice_centres(
 
     Returns
     -------
-    np.ndarray, shape (2, nj, ni)
+    NDArrayFloat, shape (2, nj, ni)
         Lattice centre coordinate meshes.
     """
     x_min, y_min, x_max, y_max = bounds
@@ -482,7 +482,7 @@ def _tiles_from_centres(
     centres: NDArrayFloat,
     verts: NDArrayFloat,
     surface_to_cover: Surface,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[NDArrayFloat, NDArrayBool]:
     """Instantiate the tiles of a centre lattice that touch *surface_to_cover*.
 
     The lattice is generated with a few extra rings of cells beyond the
@@ -507,9 +507,9 @@ def _tiles_from_centres(
 
     Returns
     -------
-    kept_polygons : np.ndarray of shapely.Polygon, shape (n_kept,)
+    kept_polygons : NDArrayFloat of shapely.Polygon, shape (n_kept,)
         Tiles intersecting the surface, in lattice order.
-    mask : np.ndarray of bool, shape (nj * ni,)
+    mask : NDArray of bool, shape (nj * ni,)
         Keep mask over the full lattice, suitable for the structured
         adjacency builders.
     """
@@ -547,7 +547,7 @@ def _tiles_from_centres(
 
 
 def _vectorized_grid_adjacency(
-    n_rows: int, n_cols: int, mask: np.ndarray, offsets: np.ndarray
+    n_rows: int, n_cols: int, mask: NDArrayBool, offsets: NDArrayFloat
 ) -> Dict[int, List[int]]:
     """Vectorized adjacency builder for a uniform offset list.
 
@@ -559,9 +559,9 @@ def _vectorized_grid_adjacency(
     ----------
     n_rows, n_cols : int
         Grid dimensions.
-    mask : np.ndarray of shape (n_rows * n_cols,)
+    mask : NDArrayBool of shape (n_rows * n_cols,)
         Boolean array indicating which polygons exist.
-    offsets : np.ndarray of shape (n_offsets, 2)
+    offsets : NDArrayFloat of shape (n_offsets, 2)
         ``(dr, dc)`` neighbour offsets applied uniformly to every cell.
 
     Returns
@@ -576,8 +576,8 @@ def _vectorized_grid_adjacency(
 
     r_valid, c_valid = np.where(mask2d)
 
-    src_parts: List[np.ndarray] = []
-    dst_parts: List[np.ndarray] = []
+    src_parts: List[NDArrayInt] = []
+    dst_parts: List[NDArrayInt] = []
 
     for dr, dc in offsets:
         nr = r_valid + dr
@@ -595,7 +595,7 @@ def _vectorized_grid_adjacency(
 
 
 def rectangular_grid_adjacency_masked(
-    n_rows: int, n_cols: int, mask: np.ndarray
+    n_rows: int, n_cols: int, mask: NDArrayBool
 ) -> Dict[int, List[int]]:
     """
     Build adjacency dictionary for a rectangular grid of polygons with a mask.
@@ -618,7 +618,7 @@ def rectangular_grid_adjacency_masked(
         Number of rows in the grid.
     n_cols : int
         Number of columns in the grid.
-    mask : np.ndarray of shape (rows*cols,)
+    mask : NDArrayBool of shape (rows*cols,)
         Boolean array indicating which polygons exist (True).
 
     Returns
@@ -700,7 +700,7 @@ def gen_rectangular_tiling(
 def hexagonal_grid_adjacency_masked(
     nv: int,
     nh: int,
-    mask: np.ndarray,
+    mask: NDArrayBool,
 ) -> Dict[int, List[int]]:
     """
     Build adjacency dictionary for a hexagonal grid of polygons with a mask.
@@ -721,7 +721,7 @@ def hexagonal_grid_adjacency_masked(
         Number of rows in the grid.
     nh : int
         Number of columns in the grid.
-    mask : np.ndarray of shape (nv*nh,)
+    mask : NDArrayBool of shape (nv*nh,)
         Boolean array indicating which polygons exist (True).
 
     Returns
@@ -982,7 +982,7 @@ def adjacency_by_shared_vertices(
 
 
 def triangular_grid_adjacency_masked(
-    nj: int, ni: int, mask: np.ndarray
+    nj: int, ni: int, mask: NDArrayBool
 ) -> Dict[int, List[int]]:
     """
     Build adjacency dictionary for a triangular grid produced by
@@ -1003,7 +1003,7 @@ def triangular_grid_adjacency_masked(
         Number of lattice rows.
     ni : int
         Number of lattice columns.
-    mask : np.ndarray of shape (nj * ni * 2,)
+    mask : NDArrayBool of shape (nj * ni * 2,)
         Boolean array indicating which triangles exist.
 
     Returns
@@ -1052,8 +1052,8 @@ def triangular_grid_adjacency_masked(
         (1, 0, 0),
     ]
 
-    src_parts: List[np.ndarray] = []
-    dst_parts: List[np.ndarray] = []
+    src_parts: List[NDArrayInt] = []
+    dst_parts: List[NDArrayInt] = []
 
     for k_src, offsets in [(0, offsets_k0), (1, offsets_k1)]:
         sel = k_valid == k_src
@@ -1079,9 +1079,9 @@ def triangular_grid_adjacency_masked(
 
 
 def intersects_mask(
-    polygons: np.ndarray,
+    polygons: NDArrayFloat,
     surface: Surface,
-) -> np.ndarray:
+) -> NDArrayInt:
     """Return a boolean mask of polygons intersecting *surface*.
 
     When *surface* is a :class:`Disk`, membership is decided analytically
@@ -1099,7 +1099,7 @@ def intersects_mask(
 
     Parameters
     ----------
-    polygons : np.ndarray of shapely.Polygon, shape (n_polygons,)
+    polygons : NDArrayFloat of shapely.Polygon, shape (n_polygons,)
         Candidate tiles. When *surface* is a :class:`Disk` they must be
         convex, which every tile produced by this module is.
     surface : Surface
@@ -1107,7 +1107,7 @@ def intersects_mask(
 
     Returns
     -------
-    np.ndarray of bool, shape (n_polygons,)
+    NDArrayFloat of bool, shape (n_polygons,)
         Mask of the polygons intersecting *surface*.
     """
     if len(polygons) == 0:

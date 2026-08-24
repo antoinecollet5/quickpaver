@@ -107,7 +107,7 @@ from scipy.sparse import coo_array, csc_array
 from shapely.strtree import STRtree
 
 from quickpaver._grid import RectilinearGrid, TriMesh
-from quickpaver._types import ArrayLike, NDArrayBool, NDArrayInt
+from quickpaver._types import ArrayLike, NDArrayBool, NDArrayFloat, NDArrayInt
 
 _HAS_NUMBA = False
 
@@ -126,7 +126,7 @@ except ModuleNotFoundError:
         return decorator
 
     # Fallback: prange is just range
-    prange = range  # ty:ignore[invalid-assignment]
+    prange = range
 
 
 #: Any of the three grid representations accepted on either side of a
@@ -143,7 +143,7 @@ GridLike = Union[RectilinearGrid, TriMesh, shapely.MultiPolygon]
 #: disjoint pieces), or ``None`` (a placeholder used by the purely
 #: analytic/Shapely-free paths, which never materialize exact
 #: geometry). See :func:`_pack_intersections`.
-IntersectionsArray = np.ndarray
+IntersectionsArray = NDArrayFloat
 
 #: Hard cap on Sutherland-Hodgman clip buffer width, and the size of
 #: the per-call scratch arrays inside the numba clip kernels (where it
@@ -587,12 +587,12 @@ def _compute_transfer_matrix(
     # Convert geometries to NumPy object arrays
     # -----------------------------------------------------------------
 
-    source_polygons: np.ndarray = np.asarray(
+    source_polygons: np.typing.NDArray[shapely.Geometry] = np.asarray(
         source_grid.geoms,
         dtype=object,
     )
 
-    target_polygons: np.ndarray = np.asarray(
+    target_polygons: np.typing.NDArray[shapely.Geometry] = np.asarray(
         target_grid.geoms,
         dtype=object,
     )
@@ -629,13 +629,13 @@ def _compute_transfer_matrix(
     # pairs[1] -> indices in source_polygons
     # -----------------------------------------------------------------
 
-    pairs: np.ndarray = tree.query(
+    pairs: NDArrayInt = tree.query(
         target_polygons,
         predicate="intersects",
     )
 
-    target_indices: np.ndarray = pairs[0]
-    source_indices: np.ndarray = pairs[1]
+    target_indices: NDArrayInt = pairs[0]
+    source_indices: NDArrayInt = pairs[1]
 
     # -----------------------------------------------------------------
     # Compute intersection areas
@@ -661,7 +661,7 @@ def _compute_transfer_matrix(
     # Compute vectorized polygon intersections
     # -------------------------------------------------------------
 
-    intersections: np.ndarray = shapely.intersection(
+    intersections: NDArrayFloat = shapely.intersection(
         source_polygons[source_indices],
         target_polygons[target_indices],
     )
@@ -669,7 +669,7 @@ def _compute_transfer_matrix(
     intersection_areas = shapely.area(intersections)
 
     # Remove empty / numerical-noise intersections
-    valid_mask: np.ndarray = intersection_areas > 1e-15
+    valid_mask: NDArrayBool = intersection_areas > 1e-15
 
     source_indices = source_indices[valid_mask]
     target_indices = target_indices[valid_mask]
@@ -683,8 +683,8 @@ def _compute_transfer_matrix(
     # over intersecting target polygons.
     # -----------------------------------------------------------------
 
-    source_areas: np.ndarray = shapely.area(source_polygons)
-    weights: np.ndarray = intersection_areas / source_areas[source_indices]
+    source_areas: NDArrayFloat = shapely.area(source_polygons)
+    weights: NDArrayFloat = intersection_areas / source_areas[source_indices]
 
     # -----------------------------------------------------------------
     # Map filtered-array indices back to original (unmasked) ids
@@ -876,7 +876,7 @@ def _compute_transfer_matrix_rectilinear_impl(
     target_ny: int,
     target_angle_deg: float,
     with_intersections: bool = True,
-) -> Tuple[NDArrayInt, NDArrayInt, np.ndarray, np.ndarray]:
+) -> Tuple[NDArrayInt, NDArrayInt, NDArrayFloat, NDArrayFloat]:
     """
     Returns the raw ``(src_lin, tgt_lin, weights, intersections)``
     quadruple -- see :func:`_separable_transfer` for why the matrix is
@@ -939,20 +939,20 @@ def _compute_transfer_matrix_rectilinear_impl(
 
 
 def _separable_transfer(
-    source_center: np.ndarray,
+    source_center: NDArrayFloat,
     source_dx: float,
     source_dy: float,
     source_nx: int,
     source_ny: int,
     source_angle: float,
-    target_center: np.ndarray,
+    target_center: NDArrayFloat,
     target_dx: float,
     target_dy: float,
     target_nx: int,
     target_ny: int,
     k90: int,
     with_intersections: bool = True,
-) -> Tuple[NDArrayInt, NDArrayInt, np.ndarray, np.ndarray]:
+) -> Tuple[NDArrayInt, NDArrayInt, NDArrayFloat, NDArrayFloat]:
     """
     Separable transfer for relative rotation = *k90* x 90 degrees.
 
@@ -1078,7 +1078,7 @@ def _separable_transfer(
     return src_lin, tgt_lin, weights, intersections
 
 
-def _sort_edges(edges: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+def _sort_edges(edges: NDArrayFloat, n: int) -> Tuple[NDArrayFloat, NDArrayInt]:
     """Return ascending edges and a mapping from sorted cell index to original."""
     if edges[-1] >= edges[0]:
         return edges, np.arange(n)
@@ -1086,8 +1086,8 @@ def _sort_edges(edges: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _compute_1d_overlaps(
-    edges_a: np.ndarray, edges_b: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    edges_a: NDArrayFloat, edges_b: NDArrayFloat
+) -> Tuple[NDArrayInt, NDArrayInt, NDArrayFloat, NDArrayFloat, NDArrayFloat]:
     """
     Find all overlapping interval pairs between two sorted edge arrays.
 
@@ -1144,20 +1144,20 @@ def _compute_1d_overlaps(
 
 
 def _nonseparable_transfer(
-    source_center: np.ndarray,
+    source_center: NDArrayFloat,
     source_dx: float,
     source_dy: float,
     source_nx: int,
     source_ny: int,
     source_angle: float,
-    target_center: np.ndarray,
+    target_center: NDArrayFloat,
     target_dx: float,
     target_dy: float,
     target_nx: int,
     target_ny: int,
     target_angle: float,
     with_intersections: bool = True,
-) -> Tuple[NDArrayInt, NDArrayInt, np.ndarray, np.ndarray]:
+) -> Tuple[NDArrayInt, NDArrayInt, NDArrayFloat, NDArrayFloat]:
     """
     Transfer matrix for two rectilinear grids at an arbitrary angle.
 
@@ -1305,13 +1305,13 @@ def _nonseparable_transfer(
 
 
 def _batch_clip_areas_and_verts(
-    tvx: np.ndarray,
-    tvy: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    tvx: NDArrayFloat,
+    tvy: NDArrayFloat,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """
     Dispatch to the fastest available back-end, also returning the
     clipped polygon vertices (padded to a fixed width, with a
@@ -1329,7 +1329,7 @@ def _batch_clip_areas_and_verts(
         Number of meaningful vertices per row (0 for an empty clip).
     """
     if _HAS_NUMBA:
-        return _batch_clip_numba_and_verts(tvx, tvy, xmin, ymin, xmax, ymax)
+        return _batch_clip_numba_and_verts(tvx, tvy, xmin, ymin, xmax, ymax)  # ty: ignore[invalid-argument-type]
     return _batch_clip_numpy_and_verts(tvx, tvy, xmin, ymin, xmax, ymax)
 
 
@@ -1338,14 +1338,14 @@ def _batch_clip_areas_and_verts(
 
 @njit(cache=True)
 def _clip_single_with_verts(
-    vx: np.ndarray,
-    vy: np.ndarray,
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
     xmin: float,
     ymin: float,
     xmax: float,
     ymax: float,
-    out_x: np.ndarray,
-    out_y: np.ndarray,
+    out_x: NDArrayFloat,
+    out_y: NDArrayFloat,
 ) -> Tuple[float, int]:
     """
     Sutherland-Hodgman clip of a 4-vertex polygon against an
@@ -1411,13 +1411,13 @@ def _clip_single_with_verts(
 
 @njit(parallel=True, cache=True)
 def _batch_clip_numba_and_verts(
-    tvx: np.ndarray,
-    tvy: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    tvx: NDArrayFloat,
+    tvy: NDArrayFloat,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     N = len(xmin)
     areas = np.empty(N)
     out_x = np.zeros((N, 8))
@@ -1443,13 +1443,13 @@ def _batch_clip_numba_and_verts(
 
 
 def _batch_clip_numpy_core(
-    tvx: np.ndarray,
-    tvy: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    tvx: NDArrayFloat,
+    tvy: NDArrayFloat,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt, NDArrayInt]:
     """
     Shared core for the numpy fallback: collects vertices from three
     sources (target corners in source, source corners in target,
@@ -1556,13 +1556,13 @@ def _batch_clip_numpy_core(
 
 
 def _batch_clip_numpy_and_verts(
-    tvx: np.ndarray,
-    tvy: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    tvx: NDArrayFloat,
+    tvy: NDArrayFloat,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """
     Numpy-only fallback for :func:`_batch_clip_numba_and_verts`: vertex
     collection + angle-sort + shoelace, returning the angle-sorted
@@ -1616,7 +1616,7 @@ class _PolygonVertexData:
 
     __slots__ = ("x", "y", "starts", "true_n", "has_holes")
 
-    def __init__(self, poly_polygons: np.ndarray) -> None:
+    def __init__(self, poly_polygons: NDArrayFloat) -> None:
         n_poly = len(poly_polygons)
         if n_poly == 0:
             _e = np.empty(0, dtype=np.intp)
@@ -1648,8 +1648,8 @@ class _PolygonVertexData:
         return int(self.true_n.max()) if len(self.true_n) else 0
 
     def local_frame_bboxes(
-        self, center: np.ndarray, angle_rad: float
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        self, center: NDArrayFloat, angle_rad: float
+    ) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayFloat]:
         """
         Per-polygon axis-aligned bounding box in a rotated grid's local
         frame, as ``(xmin, xmax, ymin, ymax)``.
@@ -1672,8 +1672,8 @@ class _PolygonVertexData:
     def padded_vertex_buffers(
         self,
         width: int,
-        local_to_grid: Optional[Tuple[np.ndarray, float]] = None,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+        local_to_grid: Optional[Tuple[NDArrayFloat, float]] = None,
+    ) -> Tuple[NDArrayFloat, NDArrayFloat]:
         """
         Scatter every polygon's (non-closing) vertices into fixed-width
         ``(n_poly, width)`` buffers suitable for the clip kernels.
@@ -1778,15 +1778,15 @@ class _PolygonVertexData:
 
 @njit(cache=True)
 def _clip_nverts_with_verts(
-    vx: np.ndarray,
-    vy: np.ndarray,
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
     n_verts: int,
     xmin: float,
     ymin: float,
     xmax: float,
     ymax: float,
-    out_x: np.ndarray,
-    out_y: np.ndarray,
+    out_x: NDArrayFloat,
+    out_y: NDArrayFloat,
 ) -> Tuple[float, int]:
     """
     Sutherland-Hodgman clip of a convex ``n_verts``-vertex polygon
@@ -1852,14 +1852,14 @@ def _clip_nverts_with_verts(
 
 @njit(parallel=True, cache=True)
 def _batch_clip_numba_nverts_and_verts(
-    vx: np.ndarray,
-    vy: np.ndarray,
-    n_verts: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
+    n_verts: NDArrayInt,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     N = len(xmin)
     width = vx.shape[1]
     areas = np.empty(N)
@@ -1927,14 +1927,14 @@ def _sh_clip_python_with_verts(
 
 
 def _batch_clip_numpy_nverts_and_verts(
-    vx: np.ndarray,
-    vy: np.ndarray,
-    n_verts: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
+    n_verts: NDArrayInt,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """Numpy/pure-Python fallback for :func:`_batch_clip_numba_nverts_and_verts`."""
     N = len(xmin)
     width = vx.shape[1]
@@ -1958,19 +1958,25 @@ def _batch_clip_numpy_nverts_and_verts(
 
 
 def _batch_clip_areas_and_verts_nverts(
-    vx: np.ndarray,
-    vy: np.ndarray,
-    n_verts: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
+    n_verts: NDArrayInt,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """Dispatch to the fastest available N-vertex clip back-end, also
     returning clipped vertices."""
     if _HAS_NUMBA:
         return _batch_clip_numba_nverts_and_verts(
-            vx, vy, n_verts, xmin, ymin, xmax, ymax
+            vx,  # ty: ignore[invalid-argument-type]
+            vy,  # ty: ignore[invalid-argument-type]
+            n_verts,  # ty: ignore[invalid-argument-type]
+            xmin,  # ty: ignore[invalid-argument-type]
+            ymin,  # ty: ignore[invalid-argument-type]
+            xmax,  # ty: ignore[invalid-argument-type]
+            ymax,  # ty: ignore[invalid-argument-type]
         )
     return _batch_clip_numpy_nverts_and_verts(vx, vy, n_verts, xmin, ymin, xmax, ymax)
 
@@ -1999,8 +2005,8 @@ def _clip_tri_rect_with_verts(
     ymin: float,
     xmax: float,
     ymax: float,
-    out_x: np.ndarray,
-    out_y: np.ndarray,
+    out_x: NDArrayFloat,
+    out_y: NDArrayFloat,
 ) -> Tuple[float, int]:
     """
     Sutherland-Hodgman clip of a 3-vertex triangle against an
@@ -2065,13 +2071,13 @@ def _clip_tri_rect_with_verts(
 
 @njit(parallel=True, cache=True)
 def _batch_clip_tri_rect_and_verts(
-    vx: np.ndarray,
-    vy: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     N = len(xmin)
     areas = np.empty(N)
     out_x = np.zeros((N, 8))
@@ -2140,13 +2146,13 @@ def _batch_clip_tri_rect_numpy_with_verts_python(
 
 
 def _batch_clip_tri_rect_numpy_and_verts(
-    vx: np.ndarray,
-    vy: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """Numpy/pure-Python fallback for :func:`_batch_clip_tri_rect_and_verts`."""
     N = len(xmin)
     areas = np.empty(N)
@@ -2168,25 +2174,25 @@ def _batch_clip_tri_rect_numpy_and_verts(
 
 
 def _batch_clip_areas_and_verts_tri_rect(
-    vx: np.ndarray,
-    vy: np.ndarray,
-    xmin: np.ndarray,
-    ymin: np.ndarray,
-    xmax: np.ndarray,
-    ymax: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
+    xmin: NDArrayFloat,
+    ymin: NDArrayFloat,
+    xmax: NDArrayFloat,
+    ymax: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """Dispatch to the fastest available triangle-vs-rect clip back-end,
     also returning clipped vertices (see
     :func:`_batch_clip_areas_and_verts_nverts` for the analogous
     N-vertex-input version)."""
     if _HAS_NUMBA:
         return _batch_clip_tri_rect_and_verts(
-            np.ascontiguousarray(vx),
-            np.ascontiguousarray(vy),
-            xmin,
-            ymin,
-            xmax,
-            ymax,
+            np.ascontiguousarray(vx),  # ty: ignore[invalid-argument-type]
+            np.ascontiguousarray(vy),  # ty: ignore[invalid-argument-type]
+            xmin,  # ty: ignore[invalid-argument-type]
+            ymin,  # ty: ignore[invalid-argument-type]
+            xmax,  # ty: ignore[invalid-argument-type]
+            ymax,  # ty: ignore[invalid-argument-type]
         )
     return _batch_clip_tri_rect_numpy_and_verts(vx, vy, xmin, ymin, xmax, ymax)
 
@@ -2221,12 +2227,12 @@ def _batch_clip_areas_and_verts_tri_rect(
 
 
 def _rectilinear_cell_corners_world(
-    center: np.ndarray,
+    center: NDArrayFloat,
     angle_rad: float,
-    x_edges: np.ndarray,
-    y_edges: np.ndarray,
+    x_edges: NDArrayFloat,
+    y_edges: NDArrayFloat,
     cell_lin: NDArrayInt,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[NDArrayFloat, NDArrayFloat]:
     """
     World-frame corner coordinates of the requested rectilinear cells.
 
@@ -2281,7 +2287,7 @@ def _rectilinear_local_frame_params(
     nx: int,
     ny: int,
     angle_deg: float,
-) -> Tuple[float, float, Tuple[np.ndarray, np.ndarray]]:
+) -> Tuple[float, float, Tuple[NDArrayFloat, NDArrayFloat]]:
     """
     Cheap scalar/edge description of a rectilinear grid.
 
@@ -2307,12 +2313,12 @@ def _rectilinear_local_frame_params(
 
 
 def _bbox_candidate_ranges_in_rectilinear_grid(
-    bbox_xmin: np.ndarray,
-    bbox_xmax: np.ndarray,
-    bbox_ymin: np.ndarray,
-    bbox_ymax: np.ndarray,
-    x_edges: np.ndarray,
-    y_edges: np.ndarray,
+    bbox_xmin: NDArrayFloat,
+    bbox_xmax: NDArrayFloat,
+    bbox_ymin: NDArrayFloat,
+    bbox_ymax: NDArrayFloat,
+    x_edges: NDArrayFloat,
+    y_edges: NDArrayFloat,
     nx: int,
     ny: int,
 ) -> Tuple[NDArrayInt, NDArrayInt, NDArrayInt]:
@@ -2474,7 +2480,7 @@ def _compute_transfer_matrix_mixed(
         )
     )
 
-    poly_polygons: np.ndarray = np.asarray(polygon_grid.geoms, dtype=object)
+    poly_polygons: NDArrayFloat = np.asarray(polygon_grid.geoms, dtype=object)
 
     n_source = n_rect if rectilinear_is_source else n_poly
     n_target = n_poly if rectilinear_is_source else n_rect
@@ -2702,7 +2708,7 @@ def _compute_transfer_matrix_mixed(
 # ===================================================================
 
 
-def _tri_world_coords(mesh: TriMesh) -> Tuple[np.ndarray, np.ndarray]:
+def _tri_world_coords(mesh: TriMesh) -> Tuple[NDArrayFloat, NDArrayFloat]:
     """
     Per-triangle vertex world coordinates, each of shape ``(n_tri, 3)``.
 
@@ -2720,8 +2726,8 @@ def _tri_world_coords(mesh: TriMesh) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _ensure_ccw_triangles(
-    tx: np.ndarray, ty: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
+    tx: NDArrayFloat, ty: NDArrayFloat
+) -> Tuple[NDArrayFloat, NDArrayFloat]:
     """
     Return a copy of ``(tx, ty)`` (each shape ``(n_tri, 3)``) with every
     triangle's vertices re-ordered to counter-clockwise winding.
@@ -3022,12 +3028,12 @@ def _compute_transfer_matrix_rect_trimesh(
 
 @njit(cache=True)
 def _clip_triangle_pair_with_verts(
-    sx: np.ndarray,
-    sy: np.ndarray,
-    cx: np.ndarray,
-    cy: np.ndarray,
-    out_x: np.ndarray,
-    out_y: np.ndarray,
+    sx: NDArrayFloat,
+    sy: NDArrayFloat,
+    cx: NDArrayFloat,
+    cy: NDArrayFloat,
+    out_x: NDArrayFloat,
+    out_y: NDArrayFloat,
 ) -> Tuple[float, int]:
     """
     Sutherland-Hodgman clip of a CCW subject triangle ``(sx, sy)``
@@ -3094,11 +3100,11 @@ def _clip_triangle_pair_with_verts(
 
 @njit(parallel=True, cache=True)
 def _batch_clip_triangles_and_verts(
-    sx: np.ndarray, sy: np.ndarray, cx: np.ndarray, cy: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    sx: NDArrayFloat, sy: NDArrayFloat, cx: NDArrayFloat, cy: NDArrayFloat
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     n = sx.shape[0]
     areas = np.empty(n)
-    out_x = np.zeros((n, 9))
+    out_x: NDArrayFloat = np.zeros((n, 9))
     out_y = np.zeros((n, 9))
     out_n = np.zeros(n, dtype=np.intp)
     for k in prange(n):  # ty:ignore[not-iterable]
@@ -3154,8 +3160,8 @@ def _sh_clip_python_generic_with_verts(subject: list, clip: list) -> Tuple[float
 
 
 def _batch_clip_triangles_numpy_and_verts(
-    sx: np.ndarray, sy: np.ndarray, cx: np.ndarray, cy: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    sx: NDArrayFloat, sy: NDArrayFloat, cx: NDArrayFloat, cy: NDArrayFloat
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """Pure-Python fallback for :func:`_batch_clip_triangles_and_verts`."""
     n = sx.shape[0]
     areas = np.empty(n)
@@ -3176,16 +3182,16 @@ def _batch_clip_triangles_numpy_and_verts(
 
 
 def _batch_clip_triangles_and_verts_dispatch(
-    sx: np.ndarray, sy: np.ndarray, cx: np.ndarray, cy: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    sx: NDArrayFloat, sy: NDArrayFloat, cx: NDArrayFloat, cy: NDArrayFloat
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """Dispatch to the fastest available triangle-triangle clip
     back-end, also returning clipped vertices."""
     if _HAS_NUMBA:
         return _batch_clip_triangles_and_verts(
-            np.ascontiguousarray(sx),
-            np.ascontiguousarray(sy),
-            np.ascontiguousarray(cx),
-            np.ascontiguousarray(cy),
+            np.ascontiguousarray(sx),  # ty: ignore[invalid-argument-type]
+            np.ascontiguousarray(sy),  # ty: ignore[invalid-argument-type]
+            np.ascontiguousarray(cx),  # ty: ignore[invalid-argument-type]
+            np.ascontiguousarray(cy),  # ty: ignore[invalid-argument-type]
         )
     return _batch_clip_triangles_numpy_and_verts(sx, sy, cx, cy)
 
@@ -3619,13 +3625,13 @@ def _compute_transfer_matrix_trimesh_polygon(
 
 @njit(cache=True)
 def _clip_convexclip_with_verts(
-    subj_x: np.ndarray,
-    subj_y: np.ndarray,
+    subj_x: NDArrayFloat,
+    subj_y: NDArrayFloat,
     n_subj: int,
-    clip_x: np.ndarray,
-    clip_y: np.ndarray,
-    out_x: np.ndarray,
-    out_y: np.ndarray,
+    clip_x: NDArrayFloat,
+    clip_y: NDArrayFloat,
+    out_x: NDArrayFloat,
+    out_y: NDArrayFloat,
 ) -> Tuple[float, int]:
     """
     Sutherland-Hodgman clip of a convex ``n_subj``-vertex subject
@@ -3687,12 +3693,12 @@ def _clip_convexclip_with_verts(
 
 @njit(parallel=True, cache=True)
 def _batch_clip_numba_convexclip_and_verts(
-    subj_vx: np.ndarray,
-    subj_vy: np.ndarray,
-    n_subj: np.ndarray,
-    clip_vx: np.ndarray,
-    clip_vy: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    subj_vx: NDArrayFloat,
+    subj_vy: NDArrayFloat,
+    n_subj: NDArrayInt,
+    clip_vx: NDArrayFloat,
+    clip_vy: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     N = len(n_subj)
     width = subj_vx.shape[1]
     areas = np.empty(N)
@@ -3715,12 +3721,12 @@ def _batch_clip_numba_convexclip_and_verts(
 
 
 def _batch_clip_numpy_convexclip_and_verts(
-    subj_vx: np.ndarray,
-    subj_vy: np.ndarray,
-    n_subj: np.ndarray,
-    clip_vx: np.ndarray,
-    clip_vy: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    subj_vx: NDArrayFloat,
+    subj_vy: NDArrayFloat,
+    n_subj: NDArrayInt,
+    clip_vx: NDArrayFloat,
+    clip_vy: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """Numpy/pure-Python fallback for :func:`_batch_clip_numba_convexclip_and_verts`."""
     N = len(n_subj)
     width = subj_vx.shape[1]
@@ -3743,17 +3749,21 @@ def _batch_clip_numpy_convexclip_and_verts(
 
 
 def _batch_clip_areas_and_verts_convexclip(
-    subj_vx: np.ndarray,
-    subj_vy: np.ndarray,
-    n_subj: np.ndarray,
-    clip_vx: np.ndarray,
-    clip_vy: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    subj_vx: NDArrayFloat,
+    subj_vy: NDArrayFloat,
+    n_subj: NDArrayInt,
+    clip_vx: NDArrayFloat,
+    clip_vy: NDArrayFloat,
+) -> Tuple[NDArrayFloat, NDArrayFloat, NDArrayFloat, NDArrayInt]:
     """Dispatch to the fastest available convex-vs-triangle clip
     back-end, also returning clipped vertices."""
     if _HAS_NUMBA:
         return _batch_clip_numba_convexclip_and_verts(
-            subj_vx, subj_vy, n_subj, clip_vx, clip_vy
+            subj_vx,  # ty: ignore[invalid-argument-type]
+            subj_vy,  # ty: ignore[invalid-argument-type]
+            n_subj,  # ty: ignore[invalid-argument-type]
+            clip_vx,  # ty: ignore[invalid-argument-type]
+            clip_vy,  # ty: ignore[invalid-argument-type]
         )
     return _batch_clip_numpy_convexclip_and_verts(
         subj_vx, subj_vy, n_subj, clip_vx, clip_vy
@@ -3766,11 +3776,11 @@ def _batch_clip_areas_and_verts_convexclip(
 
 
 def _polygons_from_padded_verts(
-    vx: np.ndarray,
-    vy: np.ndarray,
-    n_verts: np.ndarray,
-    local_to_world: Optional[Tuple[np.ndarray, float, float]] = None,
-) -> np.ndarray:
+    vx: NDArrayFloat,
+    vy: NDArrayFloat,
+    n_verts: NDArrayInt,
+    local_to_world: Optional[Tuple[NDArrayFloat, float, float]] = None,
+) -> NDArrayFloat:
     """
     Build an array of ``shapely.Polygon`` objects from a padded,
     per-row clipped-vertex buffer, using the vectorized
@@ -3853,7 +3863,7 @@ def _no_intersections() -> IntersectionsArray:
     return np.empty(0, dtype=object)
 
 
-def _pack_intersections(intersections: np.ndarray) -> IntersectionsArray:
+def _pack_intersections(intersections: NDArrayFloat) -> IntersectionsArray:
     """
     Package a per-nonzero-entry array of intersection geometries for
     return, preserving alignment with the matrix's nonzero entries.
