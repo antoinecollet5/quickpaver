@@ -8,6 +8,6 @@ The following tutorials allow you to get started and explore the possibilities o
 .. toctree::
    :maxdepth: 2
 
-   Paving (tiling) <notebooks/paving_examples>
+   Paving (tiling) <notebooks/regular_paving_examples>
 
 * :ref:`genindex`

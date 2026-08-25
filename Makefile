@@ -71,7 +71,7 @@ coverage: ## check code coverage quickly with the default Python
 docs: ## generate Sphinx HTML documentation, including API docs
 	rm -fr docs/build/
 	rm -fr docs/sources/_autosummary/
-	marimo export ipynb notebooks/paving_examples.py -o notebooks/paving_examples.ipynb --sort=top-down
+	marimo export ipynb notebooks/regular_paving_examples.py -o notebooks/regular_paving_examples.ipynb --sort=top-down
 	$(MAKE) -C docs clean
 	$(MAKE) -C docs html
 	$(BROWSER) docs/build/html/index.html
