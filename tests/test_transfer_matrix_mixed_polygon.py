@@ -21,7 +21,7 @@ from quickpaver._transfer_matrix import (
     _compute_transfer_matrix_mixed,
 )
 
-from ._tm_test_utils import (  # ty: ignore[unresolved-import]
+from _tm_test_utils import (
     l_shape_polygon,
     make_regular_grid,
     regular_ngon,

@@ -20,7 +20,7 @@ from quickpaver._transfer_matrix import (
 )
 from scipy.sparse import csc_array
 
-from ._tm_test_utils import (  # ty: ignore[unresolved-import]
+from _tm_test_utils import (
     make_grid_trimesh,
     make_regular_grid,
     regular_ngon,

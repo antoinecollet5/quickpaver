@@ -8,7 +8,7 @@ import quickpaver
 import shapely
 from quickpaver import RectilinearGrid, TriMesh
 
-from ._tm_test_utils import (  # ty: ignore[unresolved-import]
+from _tm_test_utils import (
     l_shape_polygon,
     make_grid_trimesh,
     make_single_triangle_mesh,
