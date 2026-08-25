@@ -191,8 +191,8 @@ class TestTouchingOnlyGeometry:
             tri_area_m2=np.array([0.5 * 1.01 * 1.01]),
         )
         # Sanity: the triangle's bbox does overlap the unit cell [0,1]^2.
-        assert mesh.verts_xy[:, 0].min() < 1.0
-        assert mesh.verts_xy[:, 1].min() < 1.0
+        assert np.min(mesh.verts_xy[:, 0]) < 1.0
+        assert np.min(mesh.verts_xy[:, 1]) < 1.0
         W = quickpaver.compute_transfer_matrix(rect, mesh)
         assert W.nnz == 0
 

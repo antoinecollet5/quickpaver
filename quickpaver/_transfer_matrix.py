@@ -989,8 +989,12 @@ def _separable_transfer(
     """
 
     # -- source edges in source-local frame (always ascending) --
-    src_x_edges = (np.arange(source_nx + 1) - source_nx / 2) * source_dx
-    src_y_edges = (np.arange(source_ny + 1) - source_ny / 2) * source_dy
+    src_x_edges = (
+        np.arange(source_nx + 1, dtype=np.float64) - source_nx / 2
+    ) * source_dx
+    src_y_edges = (
+        np.arange(source_ny + 1, dtype=np.float64) - source_ny / 2
+    ) * source_dy
 
     # -- target origin in source-local frame --
     ca, sa = np.cos(source_angle), np.sin(source_angle)
@@ -1645,7 +1649,7 @@ class _PolygonVertexData:
     @property
     def max_verts(self) -> int:
         """Largest true vertex count in the batch (0 if empty)."""
-        return int(self.true_n.max()) if len(self.true_n) else 0
+        return int(np.max(self.true_n)) if len(self.true_n) else 0
 
     def local_frame_bboxes(
         self, center: NDArrayFloat, angle_rad: float
@@ -2306,8 +2310,8 @@ def _rectilinear_local_frame_params(
         np.deg2rad(angle_deg),
         dx * dy,
         (
-            (np.arange(nx + 1) - nx / 2) * dx,
-            (np.arange(ny + 1) - ny / 2) * dy,
+            (np.arange(nx + 1, dtype=np.float64) - nx / 2) * dx,
+            (np.arange(ny + 1, dtype=np.float64) - ny / 2) * dy,
         ),
     )
 
@@ -2873,8 +2877,12 @@ def _compute_transfer_matrix_rect_trimesh(
     rect_angle_rad = np.deg2rad(rectilinear_angle_deg)
     rc_ca, rc_sa = np.cos(rect_angle_rad), np.sin(rect_angle_rad)
 
-    x_edges = (np.arange(rectilinear_nx + 1) - rectilinear_nx / 2) * rectilinear_dx
-    y_edges = (np.arange(rectilinear_ny + 1) - rectilinear_ny / 2) * rectilinear_dy
+    x_edges = (
+        np.arange(rectilinear_nx + 1, dtype=np.float64) - rectilinear_nx / 2
+    ) * rectilinear_dx
+    y_edges = (
+        np.arange(rectilinear_ny + 1, dtype=np.float64) - rectilinear_ny / 2
+    ) * rectilinear_dy
     rect_cell_area = rectilinear_dx * rectilinear_dy
 
     # -- triangle vertices, world frame -> rectilinear-grid-local frame,
