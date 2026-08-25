@@ -8,6 +8,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import shapely
+
 from quickpaver import TriMesh
 
 

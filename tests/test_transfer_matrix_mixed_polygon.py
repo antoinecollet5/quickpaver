@@ -16,16 +16,15 @@ import pytest
 import quickpaver
 import shapely
 from quickpaver import RectilinearGrid
-from quickpaver._transfer_matrix import (
-    _clip_buffer_width,
-    _compute_transfer_matrix_mixed,
-)
-
-from _tm_test_utils import (
+from quickpaver._tm_test_utils import (
     l_shape_polygon,
     make_regular_grid,
     regular_ngon,
     square_with_hole,
+)
+from quickpaver._transfer_matrix import (
+    _clip_buffer_width,
+    _compute_transfer_matrix_mixed,
 )
 
 

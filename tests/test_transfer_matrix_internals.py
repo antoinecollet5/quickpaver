@@ -7,6 +7,12 @@ import pytest
 import quickpaver
 import shapely
 from quickpaver import RectilinearGrid, TriMesh
+from quickpaver._tm_test_utils import (
+    make_grid_trimesh,
+    make_regular_grid,
+    regular_ngon,
+    square_with_hole,
+)
 from quickpaver._transfer_matrix import (
     _bbox_candidate_ranges_in_rectilinear_grid,
     _check_intersections_alignment,
@@ -19,13 +25,6 @@ from quickpaver._transfer_matrix import (
     _validate_mask,
 )
 from scipy.sparse import csc_array
-
-from _tm_test_utils import (
-    make_grid_trimesh,
-    make_regular_grid,
-    regular_ngon,
-    square_with_hole,
-)
 
 # ---------------------------------------------------------------------------
 # Masks on paths the original test files never exercised

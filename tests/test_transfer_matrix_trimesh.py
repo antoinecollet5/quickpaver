@@ -7,8 +7,7 @@ import pytest
 import quickpaver
 import shapely
 from quickpaver import RectilinearGrid, TriMesh
-
-from _tm_test_utils import (
+from quickpaver._tm_test_utils import (
     l_shape_polygon,
     make_grid_trimesh,
     make_single_triangle_mesh,
