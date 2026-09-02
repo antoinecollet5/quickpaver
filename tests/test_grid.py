@@ -12,6 +12,7 @@ import pytest
 import quickpaver
 import shapely
 from quickpaver._grid import (
+    _as_full_slice_tuple,
     _get_centroid_voxel_coords,
     _get_free_grid_cells,
     _get_mask,
@@ -21,6 +22,9 @@ from quickpaver._grid import (
     _rotation_x,
     _rotation_y,
     _rotation_z,
+    rlg_idx_to_nn,
+    span_to_node_numbers_2d,
+    span_to_node_numbers_3d,
 )
 from scipy.sparse import csc_array
 
@@ -225,6 +229,172 @@ def test_span_to_node_numbers_3d() -> None:
     np.testing.assert_array_equal(result, np.array([2, 6], dtype=np.int32))
 
 
+def test_rlg_idx_to_nn_1d_only():
+    result = rlg_idx_to_nn(np.array([0, 1, 2]), nx=5)
+    np.testing.assert_array_equal(result, np.array([0, 1, 2]))
+
+
+# ---------------------------------------------------------------------------
+# _as_full_slice_tuple
+# ---------------------------------------------------------------------------
+
+
+def test_as_full_slice_tuple_bare_slice_is_expanded():
+    result = _as_full_slice_tuple(slice(None), ndims=2)
+    assert result == (slice(None), slice(None))
+
+
+def test_as_full_slice_tuple_bare_slice_expanded_3d():
+    result = _as_full_slice_tuple(slice(1, 3), ndims=3)
+    assert result == (slice(1, 3), slice(None), slice(None))
+
+
+def test_as_full_slice_tuple_full_tuple_of_slices_passes_through():
+    span = (slice(0, 2), slice(None))
+    result = _as_full_slice_tuple(span, ndims=2)
+    assert result == span
+
+
+def test_as_full_slice_tuple_wrong_length_tuple_returns_none():
+    span = (slice(None),)  # only 1 slice, ndims=2 expected
+    assert _as_full_slice_tuple(span, ndims=2) is None
+
+
+def test_as_full_slice_tuple_non_tuple_non_slice_returns_none():
+    span = np.array([0, 1, 2])
+    assert _as_full_slice_tuple(span, ndims=2) is None
+
+
+def test_as_full_slice_tuple_mixed_tuple_returns_none():
+    span = (slice(None), np.array([0, 1]))
+    assert _as_full_slice_tuple(span, ndims=2) is None  # ty: ignore[invalid-argument-type]
+
+
+# ---------------------------------------------------------------------------
+# span_to_node_numbers_2d
+# ---------------------------------------------------------------------------
+
+
+def _brute_force_2d(span, nx, ny):
+    """Reference/oracle implementation using pure dense numpy selection."""
+    a = np.zeros((nx, ny))
+    a[span] = 1.0
+    row, col = np.nonzero(a)
+    return np.array(row + col * nx, dtype=np.int32)
+
+
+def test_span_to_node_numbers_2d_full_slice_fast_path():
+    nx, ny = 3, 4
+    result = span_to_node_numbers_2d(slice(None), nx, ny)
+    expected = _brute_force_2d(slice(None), nx, ny)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+    assert result.dtype == np.int32
+    assert len(result) == nx * ny
+
+
+def test_span_to_node_numbers_2d_tuple_of_slices_fast_path():
+    nx, ny = 5, 6
+    span = (slice(1, 3), slice(2, 5))
+    result = span_to_node_numbers_2d(span, nx, ny)
+    expected = _brute_force_2d(span, nx, ny)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+    assert result.dtype == np.int32
+
+
+def test_span_to_node_numbers_2d_negative_and_step_slices_fast_path():
+    nx, ny = 6, 7
+    span = (slice(-3, None), slice(0, None, 2))
+    result = span_to_node_numbers_2d(span, nx, ny)
+    expected = _brute_force_2d(span, nx, ny)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+
+
+def test_span_to_node_numbers_2d_boolean_mask_fallback():
+    nx, ny = 4, 4
+    mask = np.zeros((nx, ny), dtype=bool)
+    mask[0, :] = True
+    mask[:, 2] = True
+    result = span_to_node_numbers_2d(mask, nx, ny)
+    expected = _brute_force_2d(mask, nx, ny)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+    assert result.dtype == np.int32
+
+
+def test_span_to_node_numbers_2d_integer_index_array_fallback():
+    nx, ny = 4, 4
+    span = np.array([0, 1, 3])  # selects rows 0, 1, 3 (integer fancy index)
+    result = span_to_node_numbers_2d(span, nx, ny)
+    expected = _brute_force_2d(span, nx, ny)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+
+
+def test_span_to_node_numbers_2d_mixed_tuple_fallback():
+    # A tuple that is the right length but not made only of slices must
+    # take the dense fallback path.
+    nx, ny = 4, 4
+    span = (np.array([0, 2]), slice(None))
+    result = span_to_node_numbers_2d(span, nx, ny)  # ty: ignore[invalid-argument-type]
+    expected = _brute_force_2d(span, nx, ny)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+
+
+# ---------------------------------------------------------------------------
+# span_to_node_numbers_3d
+# ---------------------------------------------------------------------------
+
+
+def _brute_force_3d(span, nx, ny, nz):
+    a = np.zeros((nx, ny, nz))
+    a[span] = 1.0
+    ix, iy, iz = np.nonzero(a)
+    return np.array(ix + iy * nx + iz * ny * nx, dtype=np.int32)
+
+
+def test_span_to_node_numbers_3d_full_slice_fast_path():
+    nx, ny, nz = 2, 3, 4
+    result = span_to_node_numbers_3d(slice(None), nx, ny, nz)
+    expected = _brute_force_3d(slice(None), nx, ny, nz)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+    assert result.dtype == np.int32
+    assert len(result) == nx * ny * nz
+
+
+def test_span_to_node_numbers_3d_tuple_of_slices_fast_path():
+    nx, ny, nz = 5, 5, 5
+    span = (slice(0, 2), slice(1, None), slice(None, None, 2))
+    result = span_to_node_numbers_3d(span, nx, ny, nz)
+    expected = _brute_force_3d(span, nx, ny, nz)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+    assert result.dtype == np.int32
+
+
+def test_span_to_node_numbers_3d_boolean_mask_fallback():
+    nx, ny, nz = 3, 3, 3
+    mask = np.zeros((nx, ny, nz), dtype=bool)
+    mask[0, 0, :] = True
+    mask[1, :, 1] = True
+    result = span_to_node_numbers_3d(mask, nx, ny, nz)
+    expected = _brute_force_3d(mask, nx, ny, nz)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+    assert result.dtype == np.int32
+
+
+def test_span_to_node_numbers_3d_integer_index_array_fallback():
+    nx, ny, nz = 3, 3, 3
+    span = np.array([0, 2])
+    result = span_to_node_numbers_3d(span, nx, ny, nz)
+    expected = _brute_force_3d(span, nx, ny, nz)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+
+
+def test_span_to_node_numbers_3d_wrong_length_tuple_fallback():
+    nx, ny, nz = 3, 3, 3
+    span = (slice(0, 2), slice(None))  # only 2 slices, ndims=3 expected
+    result = span_to_node_numbers_3d(span, nx, ny, nz)  # ty: ignore[invalid-argument-type]
+    expected = _brute_force_3d(span, nx, ny, nz)
+    np.testing.assert_array_equal(np.sort(result), np.sort(expected))
+
+
 # ---------------------------------------------------------------------------
 # Generic utilities
 # ---------------------------------------------------------------------------
@@ -377,6 +547,12 @@ def test_rectilinear_grid_rotation() -> None:
 
     np.testing.assert_allclose(rotated[:, 0], [0.0, 1.0, 0.0], atol=1e-12)
     assert grid.bounding_box_vertices_coordinates.shape == (3, 8)
+
+
+def test_rectilinear_grid_contour() -> None:
+    """Check the contour property."""
+    grid = quickpaver.RectilinearGrid(theta=90.0)
+    assert grid.contour is not None
 
 
 # ---------------------------------------------------------------------------
