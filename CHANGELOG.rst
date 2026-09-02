@@ -2,6 +2,36 @@
 Changelog
 ==============
 
+0.4.0 (2026-08-25)
+------------------
+
+* ENH: implement ``TriMesh`` for triangular mesh support, with a conservative
+  transfer matrix implementation.
+* ENH: add ``compute_transfer_matrix_with_intersections`` to compute transfer
+  matrices while also returning the underlying geometric intersections, with
+  support for masks.
+* ENH: implement a conservative transfer matrix for rectilinear grids, backed
+  by numpy/numba for improved performance.
+* ENH: add ``Disk`` polygon support in ``gen_polygonal_tiling``, and optimize
+  the multipolygon creation.
+* ENH: add ``intersects_mask`` utility.
+* ENH: add adjacency and plotting utilities:
+
+  * ``adjacency_by_shared_vertices``
+  * ``adjacency_to_edges``
+  * ``draw_adjacency``
+
+* ENH: ``extract_tiling_vertices`` now also returns the adjacency between
+  polygons and vertices.
+* ENH: add a ``contour`` property to ``RectilinearGrid``.
+* ENH: significant performance improvements for ``RectilinearGrid`` and
+  ``tilling.py``, including "F"-order transfer matrix computation on
+  rectilinear grids.
+* FIX: fix the adjacency computation in the tiling module.
+* TEST: add extensive test coverage for the transfer matrix, ``TriMesh``,
+  and plotting utilities.
+* Update CI/tooling to Python 3.14 and ``ty==0.0.74``.
+
 0.3.1 (2026-06-16)
 ------------------
 
