@@ -597,7 +597,7 @@ class TestGcFaceAreaM2:
 
 
 # ---------------------------------------------------------------------------
-# pipj
+# pipj_m
 # ---------------------------------------------------------------------------
 
 
@@ -611,12 +611,12 @@ class TestPipj:
         ],
     )
     def test_returns_cell_dimension(self, small_grid, axis, expected):
-        assert small_grid.pipj(axis) == pytest.approx(expected)
+        assert small_grid.pipj_m(axis) == pytest.approx(expected)
 
     @pytest.mark.parametrize("axis", [3, -1, 100])
     def test_invalid_axis_raises(self, small_grid, axis):
         with pytest.raises(ValueError):
-            small_grid.pipj(axis)
+            small_grid.pipj_m(axis)
 
 
 # ---------------------------------------------------------------------------

@@ -1328,7 +1328,7 @@ class RectilinearGrid(Grid):
             return self.dx * self.dy
         raise ValueError("`axis` should be among [0, 1, 2]")
 
-    def pipj(self, axis: int) -> float:
+    def pipj_m(self, axis: int) -> float:
         """
         Return the distance between the centers of two contiguous grid cells.
 
