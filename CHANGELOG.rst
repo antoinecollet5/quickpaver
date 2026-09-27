@@ -2,6 +2,14 @@
 Changelog
 ==============
 
+0.5.0 (2026-08-25)
+------------------
+
+* ENH: generalize ``get_array_borders_selection`` to any dim.
+* ENH: add methods to RectilinearGrid: ``gc_face_area_m2``, ``pipj_m``, ``get_slicer_forward`` and ``get_slicer_backward``.
+* STYLE: upgrade to `ty==0.0.84`.
+
+
 0.4.0 (2026-08-25)
 ------------------
 
