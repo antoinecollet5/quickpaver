@@ -22,6 +22,7 @@ from quickpaver._grid import (
     _rotation_x,
     _rotation_y,
     _rotation_z,
+    get_array_borders_selection,
     rlg_idx_to_nn,
     span_to_node_numbers_2d,
     span_to_node_numbers_3d,
@@ -553,6 +554,156 @@ def test_rectilinear_grid_contour() -> None:
     """Check the contour property."""
     grid = quickpaver.RectilinearGrid(theta=90.0)
     assert grid.contour is not None
+
+
+# A grid with distinct dx/dy/dz and nx/ny/nz so that axis mix-ups
+# (e.g. using dy instead of dz, or nx instead of ny) are caught.
+DX, DY, DZ = 2.0, 3.0, 5.0
+NX, NY, NZ = 4, 5, 6
+
+
+@pytest.fixture
+def small_grid() -> quickpaver.RectilinearGrid:
+    return quickpaver.RectilinearGrid(dx=DX, dy=DY, dz=DZ, nx=NX, ny=NY, nz=NZ)
+
+
+# ---------------------------------------------------------------------------
+# gc_face_area_m2
+# ---------------------------------------------------------------------------
+
+
+class TestGcFaceAreaM2:
+    @pytest.mark.parametrize(
+        "axis, expected",
+        [
+            (0, DY * DZ),
+            (1, DX * DZ),
+            (2, DX * DY),
+        ],
+    )
+    def test_returns_expected_area(self, small_grid, axis, expected):
+        assert small_grid.gc_face_area_m2(axis) == pytest.approx(expected)
+
+    @pytest.mark.parametrize("axis", [3, -1, 10])
+    def test_invalid_axis_raises(self, small_grid, axis):
+        with pytest.raises(ValueError):
+            small_grid.gc_face_area_m2(axis)
+
+    def test_matches_gamma_ij_properties(self, small_grid):
+        """The method should agree with the equivalent gamma_ij_*_m2 properties."""
+        assert small_grid.gc_face_area_m2(0) == pytest.approx(small_grid.gamma_ij_x_m2)
+        assert small_grid.gc_face_area_m2(1) == pytest.approx(small_grid.gamma_ij_y_m2)
+        assert small_grid.gc_face_area_m2(2) == pytest.approx(small_grid.gamma_ij_z_m2)
+
+
+# ---------------------------------------------------------------------------
+# pipj
+# ---------------------------------------------------------------------------
+
+
+class TestPipj:
+    @pytest.mark.parametrize(
+        "axis, expected",
+        [
+            (0, DX),
+            (1, DY),
+            (2, DZ),
+        ],
+    )
+    def test_returns_cell_dimension(self, small_grid, axis, expected):
+        assert small_grid.pipj(axis) == pytest.approx(expected)
+
+    @pytest.mark.parametrize("axis", [3, -1, 100])
+    def test_invalid_axis_raises(self, small_grid, axis):
+        with pytest.raises(ValueError):
+            small_grid.pipj(axis)
+
+
+# ---------------------------------------------------------------------------
+# get_slicer_forward / get_slicer_backward
+# ---------------------------------------------------------------------------
+
+
+class TestSlicers:
+    @pytest.mark.parametrize(
+        "axis, n",
+        [(0, NX), (1, NY), (2, NZ)],
+    )
+    def test_forward_default_shift_selects_all_but_last(self, small_grid, axis, n):
+        slicer = small_grid.get_slicer_forward(axis)
+        assert len(slicer) == 3
+        assert slicer[axis] == slice(0, n - 1)
+        for other_axis in range(3):
+            if other_axis != axis:
+                assert slicer[other_axis] == slice(None)
+
+    @pytest.mark.parametrize(
+        "axis, n",
+        [(0, NX), (1, NY), (2, NZ)],
+    )
+    def test_backward_default_shift_selects_all_but_first(self, small_grid, axis, n):
+        slicer = small_grid.get_slicer_backward(axis)
+        assert len(slicer) == 3
+        assert slicer[axis] == slice(1, n)
+        for other_axis in range(3):
+            if other_axis != axis:
+                assert slicer[other_axis] == slice(None)
+
+    @pytest.mark.parametrize("axis", [0, 1, 2])
+    @pytest.mark.parametrize("shift", [-1, 0, 1, 2])
+    def test_shift_moves_the_upper_bound(self, small_grid, axis, shift):
+        n = small_grid.shape[axis]
+        assert small_grid.get_slicer_forward(axis, shift)[axis] == slice(
+            0, n - 1 + shift
+        )
+        assert small_grid.get_slicer_backward(axis, shift)[axis] == slice(1, n + shift)
+
+    @pytest.mark.parametrize("axis", [3, -1, 7])
+    def test_get_slicer_forward_invalid_axis_raises(self, small_grid, axis):
+        with pytest.raises(ValueError):
+            small_grid.get_slicer_forward(axis)
+
+    @pytest.mark.parametrize("axis", [3, -1, 7])
+    def test_get_slicer_backward_invalid_axis_raises(self, small_grid, axis):
+        with pytest.raises(ValueError):
+            small_grid.get_slicer_backward(axis)
+
+    @pytest.mark.parametrize("axis", [0, 1, 2])
+    def test_forward_and_backward_slicers_are_offset_by_one_cell(
+        self, small_grid, axis
+    ):
+        """
+        `get_slicer_backward(axis)` should select exactly the cells one
+        position ahead of `get_slicer_forward(axis)` along `axis`, which is
+        what lets the pair be used together as neighbour selections for a
+        finite-difference stencil.
+        """
+        field = np.zeros(small_grid.shape)
+        # Tag every cell with its index along `axis` so we can check the
+        # forward/backward selections line up correctly.
+        idx = small_grid.indices[axis]
+        field[...] = idx
+
+        forward_values = field[small_grid.get_slicer_forward(axis)]
+        backward_values = field[small_grid.get_slicer_backward(axis)]
+
+        assert forward_values.shape == backward_values.shape
+        np.testing.assert_array_equal(backward_values - forward_values, 1)
+
+    @pytest.mark.parametrize("axis", [0, 1, 2])
+    def test_slicers_select_n_minus_one_interior_faces(self, small_grid, axis):
+        n = small_grid.shape[axis]
+        field = np.zeros(small_grid.shape)
+        forward_values = field[small_grid.get_slicer_forward(axis)]
+        assert forward_values.shape[axis] == n - 1
+
+    def test_slicer_shapes_are_consistent_across_axes(self, small_grid):
+        """Sanity check that slicing with a given axis only shrinks that axis."""
+        for axis in range(3):
+            sliced = np.zeros(small_grid.shape)[small_grid.get_slicer_forward(axis)]
+            expected_shape = list(small_grid.shape)
+            expected_shape[axis] -= 1
+            assert sliced.shape == tuple(expected_shape)
 
 
 # ---------------------------------------------------------------------------
@@ -1417,3 +1568,348 @@ def test_conservative_upsample_validation_values_and_sum() -> None:
         result[:2, :2],
         np.full((2, 2), 0.25),
     )
+
+
+class TestBasicDimensions:
+    """Test basic functionality for various dimensions."""
+
+    def test_1d_border(self):
+        """Test 1D array - only endpoints are borders."""
+        result = get_array_borders_selection(5)
+        expected = np.array([True, False, False, False, True], dtype=np.bool_)
+        assert result.shape == (5,)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_1d_single_element(self):
+        """Test 1D array with single element."""
+        result = get_array_borders_selection(1)
+        expected = np.ones(1, dtype=np.bool_)
+        assert result.shape == (1,)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_1d_two_elements(self):
+        """Test 1D array with two elements."""
+        result = get_array_borders_selection(2)
+        expected = np.ones(2, dtype=np.bool_)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_2d_border(self):
+        """Test 2D array - borders at edges."""
+        result = get_array_borders_selection(3, 3)
+        expected = np.array(
+            [[True, True, True], [True, False, True], [True, True, True]],
+            dtype=np.bool_,
+        )
+        assert result.shape == (3, 3)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_2d_rectangular(self):
+        """Test 2D rectangular array."""
+        result = get_array_borders_selection(2, 4)
+        expected = np.array(
+            [[True, True, True, True], [True, True, True, True]], dtype=np.bool_
+        )
+        assert result.shape == (2, 4)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_2d_large(self):
+        """Test larger 2D array."""
+        result = get_array_borders_selection(5, 7)
+        assert result.shape == (5, 7)
+        # Check corners
+        assert result[0, 0]
+        assert result[0, -1]
+        assert result[-1, 0]
+        assert result[-1, -1]
+        # Check interior
+        assert not result[2, 3]
+        # Check edges
+        assert result[0, 3]
+        assert result[2, 0]
+
+    def test_3d_border(self):
+        """Test 3D array - borders on all faces."""
+        result = get_array_borders_selection(3, 3, 3)
+        assert result.shape == (3, 3, 3)
+        # All corners should be True
+        corners = [
+            (0, 0, 0),
+            (0, 0, 2),
+            (0, 2, 0),
+            (0, 2, 2),
+            (2, 0, 0),
+            (2, 0, 2),
+            (2, 2, 0),
+            (2, 2, 2),
+        ]
+        for corner in corners:
+            assert result[corner]
+        # Interior should be False
+        assert not result[1, 1, 1]
+        # Face centers should be True
+        assert result[0, 1, 1]
+        assert result[2, 1, 1]
+
+    def test_3d_rectangular(self):
+        """Test rectangular 3D array."""
+        result = get_array_borders_selection(2, 3, 4)
+        assert result.shape == (2, 3, 4)
+        # Check a few key positions
+        assert result[0, 0, 0]
+        assert result[1, 2, 3]
+
+    def test_4d_border(self):
+        """Test 4D array."""
+        result = get_array_borders_selection(2, 2, 2, 2)
+        assert result.shape == (2, 2, 2, 2)
+        # All elements should be True since all dimensions are 2
+        np.testing.assert_array_equal(result, np.ones((2, 2, 2, 2), dtype=np.bool_))
+
+    def test_5d_border(self):
+        """Test 5D array."""
+        result = get_array_borders_selection(3, 3, 3, 3, 3)
+        assert result.shape == (3, 3, 3, 3, 3)
+        # Check center (should be False)
+        assert not result[1, 1, 1, 1, 1]
+        # Check corners (should be True)
+        assert result[0, 0, 0, 0, 0]
+        assert result[2, 2, 2, 2, 2]
+
+    def test_6d_border(self):
+        """Test 6D array."""
+        result = get_array_borders_selection(2, 2, 2, 2, 2, 2)
+        assert result.shape == (2, 2, 2, 2, 2, 2)
+        # All elements True since all dimensions are 2
+        np.testing.assert_array_equal(
+            result, np.ones((2, 2, 2, 2, 2, 2), dtype=np.bool_)
+        )
+
+
+class TestEdgeCases:
+    """Test edge cases and boundary conditions."""
+
+    def test_empty_1d(self):
+        """Test 1D empty array."""
+        result = get_array_borders_selection(0)
+        assert result.shape == (0,)
+        assert result.dtype == np.bool_
+
+    def test_empty_2d(self):
+        """Test 2D empty array."""
+        result = get_array_borders_selection(0, 0)
+        assert result.shape == (0, 0)
+        np.testing.assert_array_equal(result, np.zeros((0, 0), dtype=np.bool_))
+
+    def test_empty_2d_one_zero(self):
+        """Test 2D array with one zero dimension."""
+        result = get_array_borders_selection(3, 0)
+        assert result.shape == (3, 0)
+        np.testing.assert_array_equal(result, np.zeros((3, 0), dtype=np.bool_))
+
+    def test_empty_3d_one_zero(self):
+        """Test 3D array with one zero dimension."""
+        result = get_array_borders_selection(2, 0, 3)
+        assert result.shape == (2, 0, 3)
+
+    def test_dimension_size_2(self):
+        """Test dimension of size 2 (no interior elements)."""
+        result = get_array_borders_selection(2, 2)
+        expected = np.ones((2, 2), dtype=np.bool_)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_mixed_dimension_sizes(self):
+        """Test mixed dimension sizes including 1."""
+        result = get_array_borders_selection(1, 5, 1)
+        assert result.shape == (1, 5, 1)
+        # All should be True since dims 0 and 2 are size 1
+        np.testing.assert_array_equal(result, np.ones((1, 5, 1), dtype=np.bool_))
+
+    def test_single_interior_element(self):
+        """Test array with only interior element."""
+        result = get_array_borders_selection(3, 3)
+        # Count False values (interior)
+        interior_count = np.sum(~result)
+        assert interior_count == 1  # Only center is False
+
+    def test_dimension_1_in_middle(self):
+        """Test dimension of size 1 in middle position."""
+        result = get_array_borders_selection(3, 1, 3)
+        assert result.shape == (3, 1, 3)
+        # All should be True since middle dimension is 1
+        np.testing.assert_array_equal(result, np.ones((3, 1, 3), dtype=np.bool_))
+
+
+class TestBorderCorrectness:
+    """Test correctness of border identification."""
+
+    def test_2d_all_borders_identified(self):
+        """Verify all border elements are True in 2D."""
+        result = get_array_borders_selection(4, 4)
+        # Check all edges
+        assert np.all(result[0, :])  # Top edge
+        assert np.all(result[-1, :])  # Bottom edge
+        assert np.all(result[:, 0])  # Left edge
+        assert np.all(result[:, -1])  # Right edge
+
+    def test_2d_interior_not_border(self):
+        """Verify interior elements are False in 2D."""
+        result = get_array_borders_selection(5, 5)
+        interior = result[1:-1, 1:-1]
+        assert np.all(~interior)
+
+    def test_3d_all_faces_identified(self):
+        """Verify all face elements are True in 3D."""
+        result = get_array_borders_selection(4, 4, 4)
+        # Check all faces
+        assert np.all(result[0, :, :])  # Front face
+        assert np.all(result[-1, :, :])  # Back face
+        assert np.all(result[:, 0, :])  # Left face
+        assert np.all(result[:, -1, :])  # Right face
+        assert np.all(result[:, :, 0])  # Top face
+        assert np.all(result[:, :, -1])  # Bottom face
+
+    def test_3d_interior_not_border(self):
+        """Verify interior elements are False in 3D."""
+        result = get_array_borders_selection(5, 5, 5)
+        interior = result[1:-1, 1:-1, 1:-1]
+        assert np.all(~interior)
+
+    def test_border_count_2d(self):
+        """Verify correct number of border elements in 2D."""
+        nx, ny = 5, 6
+        result = get_array_borders_selection(nx, ny)
+        # Border count = perimeter + corners counted twice (but we're marking edges)
+        # Top + Bottom + Left + Right - 4 corners (counted twice)
+        expected_border_count = 2 * nx + 2 * ny - 4
+        actual_border_count = np.sum(result)
+        assert actual_border_count == expected_border_count
+
+    def test_border_count_3d(self):
+        """Verify correct number of border elements in 3D."""
+        nx, ny, nz = 3, 4, 5
+        result = get_array_borders_selection(nx, ny, nz)
+        # For 3D, count using inclusion-exclusion
+        # Border = all elements except interior
+        interior = np.prod([max(d - 2, 0) for d in [nx, ny, nz]])
+        expected_border_count = nx * ny * nz - interior
+        actual_border_count = np.sum(result)
+        assert actual_border_count == expected_border_count
+
+
+class TestReturnType:
+    """Test return type and dtype."""
+
+    def test_return_type_is_ndarray(self):
+        """Verify return type is ndarray."""
+        result = get_array_borders_selection(3, 3)
+        assert isinstance(result, np.ndarray)
+
+    def test_return_dtype_is_bool(self):
+        """Verify return dtype is bool."""
+        result = get_array_borders_selection(3, 3)
+        assert result.dtype == np.bool_
+
+    def test_return_dtype_is_bool_multidim(self):
+        """Verify return dtype is bool for multi-dimensional."""
+        result = get_array_borders_selection(2, 3, 4, 5)
+        assert result.dtype == np.bool_
+
+    def test_ndarray_bool_type_hint(self):
+        """Verify type hint annotation is correct."""
+        # Can't use isinstance with generic type aliases, so just verify dtype
+        result = get_array_borders_selection(3, 3)
+        assert result.dtype == np.bool_
+        assert isinstance(result, np.ndarray)
+
+
+class TestErrorHandling:
+    """Test error conditions."""
+
+    def test_no_dimensions_raises_error(self):
+        """Verify ValueError raised when no dimensions provided."""
+        with pytest.raises(ValueError, match="At least 1 dimension is required"):
+            get_array_borders_selection()
+
+
+class TestSymmetry:
+    """Test symmetry properties of borders."""
+
+    def test_2d_symmetry(self):
+        """Test symmetry in 2D."""
+        result = get_array_borders_selection(5, 5)
+        # Verify 4-fold symmetry
+        assert np.all(result == result.T)  # Transpose symmetry
+
+    def test_2d_rotational_symmetry(self):
+        """Test rotational symmetry in 2D."""
+        result = get_array_borders_selection(5, 5)
+        # Rotate 180 degrees - should be the same
+        rotated = np.rot90(result, 2)
+        np.testing.assert_array_equal(result, rotated)
+
+    def test_3d_symmetry(self):
+        """Test symmetry in 3D."""
+        result = get_array_borders_selection(5, 5, 5)
+        # Verify x-y symmetry
+        assert np.all(result == np.swapaxes(result, 0, 1))
+
+
+class TestLargeArrays:
+    """Test performance and correctness on larger arrays."""
+
+    def test_large_2d(self):
+        """Test large 2D array."""
+        result = get_array_borders_selection(100, 100)
+        assert result.shape == (100, 100)
+        # Check corners
+        assert result[0, 0]
+        assert result[99, 99]
+        # Check center
+        assert not result[50, 50]
+
+    def test_large_3d(self):
+        """Test large 3D array."""
+        result = get_array_borders_selection(50, 50, 50)
+        assert result.shape == (50, 50, 50)
+        assert result[0, 0, 0]
+        assert not result[25, 25, 25]
+
+    def test_very_large_multidim(self):
+        """Test performance with many dimensions."""
+        result = get_array_borders_selection(2, 2, 2, 2, 2, 2, 2, 2)
+        assert result.shape == (2, 2, 2, 2, 2, 2, 2, 2)
+        expected_count = 2**8  # All elements True since all dims are 2
+        assert np.sum(result) == expected_count
+
+
+class TestSpecialCases:
+    """Test special and corner cases."""
+
+    def test_single_row(self):
+        """Test array with single row."""
+        result = get_array_borders_selection(1, 10)
+        expected = np.ones((1, 10), dtype=np.bool_)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_single_column(self):
+        """Test array with single column."""
+        result = get_array_borders_selection(10, 1)
+        expected = np.ones((10, 1), dtype=np.bool_)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_thin_slice(self):
+        """Test thin 3D slice."""
+        result = get_array_borders_selection(10, 10, 1)
+        assert result.shape == (10, 10, 1)
+        # All True due to dimension 1
+        np.testing.assert_array_equal(result, np.ones((10, 10, 1), dtype=np.bool_))
+
+    def test_long_line(self):
+        """Test long 1D array - only endpoints are borders."""
+        result = get_array_borders_selection(1000)
+        assert result.shape == (1000,)
+        # Only first and last elements should be True
+        assert result[0]
+        assert result[-1]
+        # Interior should be False
+        assert np.all(~result[1:-1])

@@ -75,7 +75,13 @@ examples = [
     "nested_grid_plotter>=2.1.0",
     "pyvista[all]",
 ]
-lint = ["pre-commit", "pre-commit-hooks", "codespell", "ruff", "ty==0.0.74"]
+lint = [
+    "pre-commit",
+    "pre-commit-hooks",
+    "codespell",
+    "ruff==0.16.4",
+    "ty==0.0.84",
+]
 install = ["pip", "wheel"]
 pyvista = ["pyvista"]
 

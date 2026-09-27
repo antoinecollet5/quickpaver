@@ -1333,7 +1333,7 @@ def _batch_clip_areas_and_verts(
         Number of meaningful vertices per row (0 for an empty clip).
     """
     if _HAS_NUMBA:
-        return _batch_clip_numba_and_verts(tvx, tvy, xmin, ymin, xmax, ymax)  # ty: ignore[invalid-argument-type]
+        return _batch_clip_numba_and_verts(tvx, tvy, xmin, ymin, xmax, ymax)
     return _batch_clip_numpy_and_verts(tvx, tvy, xmin, ymin, xmax, ymax)
 
 
@@ -1974,13 +1974,13 @@ def _batch_clip_areas_and_verts_nverts(
     returning clipped vertices."""
     if _HAS_NUMBA:
         return _batch_clip_numba_nverts_and_verts(
-            vx,  # ty: ignore[invalid-argument-type]
-            vy,  # ty: ignore[invalid-argument-type]
-            n_verts,  # ty: ignore[invalid-argument-type]
-            xmin,  # ty: ignore[invalid-argument-type]
-            ymin,  # ty: ignore[invalid-argument-type]
-            xmax,  # ty: ignore[invalid-argument-type]
-            ymax,  # ty: ignore[invalid-argument-type]
+            vx,
+            vy,
+            n_verts,
+            xmin,
+            ymin,
+            xmax,
+            ymax,
         )
     return _batch_clip_numpy_nverts_and_verts(vx, vy, n_verts, xmin, ymin, xmax, ymax)
 
@@ -2191,12 +2191,12 @@ def _batch_clip_areas_and_verts_tri_rect(
     N-vertex-input version)."""
     if _HAS_NUMBA:
         return _batch_clip_tri_rect_and_verts(
-            np.ascontiguousarray(vx),  # ty: ignore[invalid-argument-type]
-            np.ascontiguousarray(vy),  # ty: ignore[invalid-argument-type]
-            xmin,  # ty: ignore[invalid-argument-type]
-            ymin,  # ty: ignore[invalid-argument-type]
-            xmax,  # ty: ignore[invalid-argument-type]
-            ymax,  # ty: ignore[invalid-argument-type]
+            np.ascontiguousarray(vx),
+            np.ascontiguousarray(vy),
+            xmin,
+            ymin,
+            xmax,
+            ymax,
         )
     return _batch_clip_tri_rect_numpy_and_verts(vx, vy, xmin, ymin, xmax, ymax)
 
@@ -3196,10 +3196,10 @@ def _batch_clip_triangles_and_verts_dispatch(
     back-end, also returning clipped vertices."""
     if _HAS_NUMBA:
         return _batch_clip_triangles_and_verts(
-            np.ascontiguousarray(sx),  # ty: ignore[invalid-argument-type]
-            np.ascontiguousarray(sy),  # ty: ignore[invalid-argument-type]
-            np.ascontiguousarray(cx),  # ty: ignore[invalid-argument-type]
-            np.ascontiguousarray(cy),  # ty: ignore[invalid-argument-type]
+            np.ascontiguousarray(sx),
+            np.ascontiguousarray(sy),
+            np.ascontiguousarray(cx),
+            np.ascontiguousarray(cy),
         )
     return _batch_clip_triangles_numpy_and_verts(sx, sy, cx, cy)
 
@@ -3767,11 +3767,11 @@ def _batch_clip_areas_and_verts_convexclip(
     back-end, also returning clipped vertices."""
     if _HAS_NUMBA:
         return _batch_clip_numba_convexclip_and_verts(
-            subj_vx,  # ty: ignore[invalid-argument-type]
-            subj_vy,  # ty: ignore[invalid-argument-type]
-            n_subj,  # ty: ignore[invalid-argument-type]
-            clip_vx,  # ty: ignore[invalid-argument-type]
-            clip_vy,  # ty: ignore[invalid-argument-type]
+            subj_vx,
+            subj_vy,
+            n_subj,
+            clip_vx,
+            clip_vy,
         )
     return _batch_clip_numpy_convexclip_and_verts(
         subj_vx, subj_vy, n_subj, clip_vx, clip_vy

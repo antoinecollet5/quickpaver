@@ -338,35 +338,71 @@ def span_to_node_numbers_3d(
     return np.array(rlg_idx_to_nn(ix, nx=nx, iy=iy, ny=ny, iz=iz), dtype=np.int32)
 
 
-def get_array_borders_selection(nx: int, ny: int) -> NDArrayBool:
+def get_array_borders_selection(*dims: int) -> NDArrayBool:
     """
-    Get a selection of the array border as a bool array.
+    Get a selection of the array borders as a bool array.
+
+    This function works for any number of dimensions (1D, 2D, 3D, ..., nD).
+    A position is on the border if at least one of its coordinates is at the
+    boundary (0 or dimension_size-1) along any axis.
 
     Note
     ----
-    There is no border for an axis of dim 1.
+    - There is no interior for an axis of dimension 1 (all elements are borders).
+    - For a 1D array, all elements are considered borders.
+    - For empty arrays (any dimension is 0), returns an all-False array.
 
     Parameters
     ----------
-    nx: int
-        Number of grid cells along the x axis.
-    ny: int
-        Number of grid cells along the y axis.
+    *dims : int
+        Number of grid cells along each axis. Supports any number of dimensions.
 
     Returns
     -------
     NDArrayBool
-        Boolean array with shape ``(nx, ny)``.
+        Boolean array with shape ``dims``, where True indicates border elements.
+
+    Raises
+    ------
+    ValueError
+        If no dimensions are provided.
+
+    Examples
+    --------
+    >>> border_1d = get_array_borders_selection(5)
+    >>> border_1d
+    array([ True, False, False, False,  True])
+
+    >>> border_2d = get_array_borders_selection(3, 3)
+    >>> border_2d
+    array([[ True,  True,  True],
+           [ True, False,  True],
+           [ True,  True,  True]])
+
+    >>> border_3d = get_array_borders_selection(2, 3, 2)
+    >>> border_3d.shape
+    (2, 3, 2)
     """
-    border = np.zeros((nx, ny), dtype=np.bool_)
+    if len(dims) == 0:
+        raise ValueError("At least 1 dimension is required")
 
-    if nx == 0 or ny == 0:
-        return border
+    # Handle zero dimensions - return empty array
+    if any(d == 0 for d in dims):
+        return np.zeros(dims, dtype=np.bool_)
 
-    border[0, :] = True
-    border[-1, :] = True
-    border[:, 0] = True
-    border[:, -1] = True
+    # Create border array - start by marking all as NOT border, then mark borders
+    # A position is interior (not border) only if ALL coordinates are in interior
+    border = np.ones(dims, dtype=np.bool_)
+
+    # Mark interior (non-border) positions
+    # An interior position has all coordinates in range [1, dim_size-2]
+    interior_slices = tuple(
+        slice(1, dim_size - 1) if dim_size > 2 else slice(0, 0) for dim_size in dims
+    )
+
+    # Only set interior to False if there actually is an interior
+    if all(dim_size > 2 for dim_size in dims):
+        border[interior_slices] = False
 
     return border
 
@@ -1255,6 +1291,172 @@ class RectilinearGrid(Grid):
                 pv_grid.cell_data[name] = values_array.reshape(-1, order="F")
 
         return pv_grid
+
+    def gc_face_area_m2(self, axis: int) -> float:
+        """
+        Return the area of a grid-cell face perpendicular to ``axis``, in m2.
+
+        Parameters
+        ----------
+        axis : int
+            Axis normal to the face: 0 for x, 1 for y, 2 for z.
+
+        Returns
+        -------
+        float
+            Face area in square metres:
+
+            - ``axis=0`` -> ``dy * dz`` (face normal to the x-axis)
+            - ``axis=1`` -> ``dx * dz`` (face normal to the y-axis)
+            - ``axis=2`` -> ``dx * dy`` (face normal to the z-axis)
+
+        Raises
+        ------
+        ValueError
+            If ``axis`` is not in ``[0, 1, 2]``.
+
+        See Also
+        --------
+        gamma_ij_x_m2, gamma_ij_y_m2, gamma_ij_z_m2 :
+            Equivalent per-axis face areas exposed as properties.
+        """
+        if axis == 0:
+            return self.dy * self.dz
+        elif axis == 1:
+            return self.dx * self.dz
+        elif axis == 2:
+            return self.dx * self.dy
+        raise ValueError("`axis` should be among [0, 1, 2]")
+
+    def pipj(self, axis: int) -> float:
+        """
+        Return the distance between the centers of two contiguous grid cells.
+
+        Since the grid is rectilinear with a uniform cell size along each local axis,
+        this distance is simply the cell dimension along ``axis``.
+
+        Parameters
+        ----------
+        axis : int
+            Axis along which the two contiguous cells are considered: 0 for x, 1 for y,
+            2 for z.
+
+        Returns
+        -------
+        float
+            The inter-cell-center distance in metres: ``dx``, ``dy`` or ``dz``
+            for ``axis`` equal to 0, 1 or 2 respectively.
+
+        Raises
+        ------
+        ValueError
+            If ``axis`` is not in ``[0, 1, 2]``.
+        """
+        if axis == 0:
+            return self.dx
+        if axis == 1:
+            return self.dy
+        if axis == 2:
+            return self.dz
+        raise ValueError("`axis` should be among [0, 1, 2]")
+
+    def get_slicer_forward(
+        self, axis: int, shift: int = 0
+    ) -> Tuple[slice, slice, slice]:
+        """
+        Return a 3D slicer selecting all cells but the last one(s) along ``axis``.
+
+        Meant to be paired with :meth:`get_slicer_backward` (same ``axis`` and
+        ``shift``) to compute finite differences: applied to a
+        ``(nx, ny, nz)``-shaped field, this slicer selects the "left" neighbour of every
+        interior face along ``axis``, while :meth:`get_slicer_backward` selects the
+        corresponding "right" neighbour, so ``field[get_slicer_backward(axis)]
+        - field[get_slicer_forward(axis)]``
+        gives the forward difference across every interior face along ``axis``.
+
+        Parameters
+        ----------
+        axis : int
+            Axis along which to build the slicer: 0 for x, 1 for y, 2 for z.
+        shift : int, optional
+            Offset added to the upper bound of the slice along ``axis``
+            (``slice(0, n - 1 + shift)``, where ``n`` is the number of cells
+            along ``axis``). The default is 0, which selects every cell except
+            the last one along ``axis``.
+
+        Returns
+        -------
+        Tuple[slice, slice, slice]
+            A tuple of 3 slices, one per axis (x, y, z), usable to index a
+            ``(nx, ny, nz)``-shaped array. The slice along ``axis`` is
+            ``slice(0, n - 1 + shift)``; the slices along the other two axes
+            are ``slice(None)`` (select everything).
+
+        Raises
+        ------
+        ValueError
+            If ``axis`` is not in ``[0, 1, 2]``.
+
+        See Also
+        --------
+        get_slicer_backward : The complementary "right neighbour" slicer.
+        """
+        if axis == 0:
+            return (slice(0, self.nx - 1 + shift), slice(None), slice(None))
+        if axis == 1:
+            return (slice(None), slice(0, self.ny - 1 + shift), slice(None))
+        if axis == 2:
+            return (slice(None), slice(None), slice(0, self.nz - 1 + shift))
+        raise ValueError("axis should be in [0, 1, 2]")
+
+    def get_slicer_backward(
+        self, axis: int, shift: int = 0
+    ) -> Tuple[slice, slice, slice]:
+        """
+        Return a 3D slicer selecting all cells but the first one(s) along ``axis``.
+
+        Meant to be paired with :meth:`get_slicer_forward` (same ``axis`` and
+        ``shift``) to compute finite differences: applied to a
+        ``(nx, ny, nz)``-shaped field, this slicer selects the "right" neighbour
+        of every interior face along ``axis``, while :meth:`get_slicer_forward`
+        selects the corresponding "left" neighbour, so
+        ``field[get_slicer_backward(axis)] - field[get_slicer_forward(axis)]``
+        gives the forward difference across every interior face along ``axis``.
+
+        Parameters
+        ----------
+        axis : int
+            Axis along which to build the slicer: 0 for x, 1 for y, 2 for z.
+        shift : int, optional
+            Offset added to the upper bound of the slice along ``axis``
+            (``slice(1, n + shift)``, where ``n`` is the number of cells along
+            ``axis``). The default is 0, which selects every cell except the
+            first one along ``axis``.
+
+        Returns
+        -------
+        Tuple[slice, slice, slice]
+            A tuple of 3 slices, one per axis (x, y, z), usable to index a
+            ``(nx, ny, nz)``-shaped array. The slice along ``axis`` is
+            ``slice(1, n + shift)``; the slices along the other two axes are
+            ``slice(None)`` (select everything).
+
+        Raises
+        ------
+        ValueError
+            If ``axis`` is not in ``[0, 1, 2]``.
+
+        See Also
+        --------
+        get_slicer_forward : The complementary "left neighbour" slicer.
+        """
+        if axis == 0:
+            return (slice(1, self.nx + shift), slice(None), slice(None))
+        if axis == 1:
+            return (slice(None), slice(1, self.ny + shift), slice(None))
+        if axis == 2:
+            return (slice(None), slice(None), slice(1, self.nz + shift))
+        raise ValueError("axis should be in [0, 1, 2]")
 
 
 def _get_vertices_centroid(
