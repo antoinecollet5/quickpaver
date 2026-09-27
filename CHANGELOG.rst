@@ -2,7 +2,7 @@
 Changelog
 ==============
 
-0.5.0 (2026-08-25)
+0.5.0 (2026-09-27)
 ------------------
 
 * ENH: generalize ``get_array_borders_selection`` to any dim.
