@@ -79,7 +79,7 @@ lint = [
     "pre-commit",
     "pre-commit-hooks",
     "codespell",
-    "ruff==0.16.4",
+    "ruff==0.16.10",
     "ty==0.0.84",
 ]
 install = ["pip", "wheel"]

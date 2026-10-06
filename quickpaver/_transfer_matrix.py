@@ -1427,7 +1427,7 @@ def _batch_clip_numba_and_verts(
     out_x = np.zeros((N, 8))
     out_y = np.zeros((N, 8))
     out_n = np.zeros(N, dtype=np.intp)
-    for idx in prange(N):  # ty:ignore[not-iterable]
+    for idx in prange(N):
         area, n_verts = _clip_single_with_verts(
             tvx[idx],
             tvy[idx],
@@ -1870,7 +1870,7 @@ def _batch_clip_numba_nverts_and_verts(
     out_x = np.zeros((N, width))
     out_y = np.zeros((N, width))
     out_n = np.zeros(N, dtype=np.intp)
-    for idx in prange(N):  # ty:ignore[not-iterable]
+    for idx in prange(N):
         area, n_out_verts = _clip_nverts_with_verts(
             vx[idx],
             vy[idx],
@@ -2087,7 +2087,7 @@ def _batch_clip_tri_rect_and_verts(
     out_x = np.zeros((N, 8))
     out_y = np.zeros((N, 8))
     out_n = np.zeros(N, dtype=np.intp)
-    for idx in prange(N):  # ty:ignore[not-iterable]
+    for idx in prange(N):
         area, n_verts = _clip_tri_rect_with_verts(
             vx[idx, 0],
             vx[idx, 1],
@@ -3115,7 +3115,7 @@ def _batch_clip_triangles_and_verts(
     out_x: NDArrayFloat = np.zeros((n, 9))
     out_y = np.zeros((n, 9))
     out_n = np.zeros(n, dtype=np.intp)
-    for k in prange(n):  # ty:ignore[not-iterable]
+    for k in prange(n):
         area, n_verts = _clip_triangle_pair_with_verts(
             sx[k], sy[k], cx[k], cy[k], out_x[k], out_y[k]
         )
@@ -3713,7 +3713,7 @@ def _batch_clip_numba_convexclip_and_verts(
     out_x = np.zeros((N, width))
     out_y = np.zeros((N, width))
     out_n = np.zeros(N, dtype=np.intp)
-    for idx in prange(N):  # ty:ignore[not-iterable]
+    for idx in prange(N):
         area, n_out_verts = _clip_convexclip_with_verts(
             subj_vx[idx],
             subj_vy[idx],
