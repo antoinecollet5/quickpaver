@@ -2,6 +2,27 @@
 Changelog
 ==============
 
+0.6.0 (2026-10-06)
+------------------
+
+* ENH: add ``extract_tiling_edge_centers`` to extract the centres of the polygon
+  edges, deduplicating the edges shared between adjacent polygons. It also returns
+  the adjacency between edges and polygons, and between polygons and edges (in ring
+  order, so that opposite edges of a rectangle are easy to retrieve).
+* FIX: ``extract_tiling_vertices`` (and therefore ``adjacency_by_shared_vertices``)
+  could fail to merge coincident vertices when a coordinate fell on a rounding tie
+  (e.g. ``1.035`` scaled to ``103.5``), because float noise sent copies of the same
+  corner to different buckets. Vertices are now merged by gap clustering, which has
+  no rounding boundary.
+* FIX: the vertex-to-polygon adjacency returned by ``extract_tiling_vertices`` was
+  wrong (some vertices had no polygon) on tilings with more polygons than vertices,
+  such as triangular tilings, due to colliding keys when grouping the pairs.
+* ENH: ``n_decimals`` in ``extract_tiling_vertices`` is now the merge tolerance
+  (``10**-n_decimals``); the returned coordinates are still rounded to ``n_decimals``.
+* TEST: add tests for ``extract_tiling_edge_centers`` and for the vertex clustering
+  (rounding ties, float noise, large coordinates), reaching 100% coverage of the
+  tiling module.
+
 0.5.0 (2026-09-27)
 ------------------
 
