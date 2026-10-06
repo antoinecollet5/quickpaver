@@ -208,10 +208,12 @@ def _pairs_to_adj(
     Parameters
     ----------
     src, dst : NDArrayInt, shape (n_edges,)
-        Compact source and destination indices of every edge.  Both must
-        lie in ``[0, n_nodes)``.
+        Compact source and destination indices of every edge.  ``src`` must
+        lie in ``[0, n_nodes)``.  ``dst`` is any non-negative integer: it
+        need not be a node id (e.g. vertex -> polygon pairs, where there
+        can be more polygons than vertices).
     n_nodes : int
-        Total number of nodes.  Nodes without any edge are present in the
+        Number of source nodes.  Nodes without any edge are present in the
         output with an empty neighbour list.
 
     Returns
@@ -229,10 +231,13 @@ def _pairs_to_adj(
     # is used rather than np.unique, whose hash-based path is an order of
     # magnitude slower on this many keys; duplicates are then dropped in a
     # single linear scan of the sorted array.
-    code = src.astype(np.int64, copy=False) * n_nodes + dst
+    # The stride must exceed every destination, which can outnumber the
+    # source nodes; packing with n_nodes would then make keys collide.
+    stride = max(n_nodes, int(np.max(dst)) + 1)
+    code = src.astype(np.int64, copy=False) * stride + dst
     code.sort()
     code = code[np.concatenate(([True], np.diff(code) != 0))]
-    src_sorted, dst_sorted = np.divmod(code, n_nodes)
+    src_sorted, dst_sorted = np.divmod(code, stride)
 
     # Slice the sorted destinations into one contiguous run per source.
     counts = np.bincount(src_sorted, minlength=n_nodes)
@@ -829,6 +834,128 @@ def extract_tiling_centers(
     return shapely.get_coordinates(centroids)
 
 
+def _cluster_points(
+    coords: NDArrayFloat, tol: float
+) -> Tuple[NDArrayInt, NDArrayFloat]:
+    """Group coincident points, immune to floating-point noise.
+
+    Snapping coordinates to a grid (``rint(x / tol)``) is fragile: a value
+    lying on a grid boundary is sent to either neighbouring bucket by
+    ~1e-15 of float noise, so the same physical point computed by two
+    different tiles may be split.  Here points are instead merged by
+    *gaps*: they are sorted, and a new group starts only where two
+    consecutive values are further apart than ``tol``.  A grid has
+    boundaries, a gap criterion does not, so noise far below ``tol`` can
+    never separate two copies of a point.
+
+    The grouping is done on ``x`` first, then on ``y`` inside every ``x``
+    group, so two points share a cluster when they are chained within
+    ``tol`` along both axes.  Distinct points closer than ``tol`` are
+    merged; callers must pick ``tol`` well below the smallest feature.
+
+    Cost is ``O(n log n)`` with two sorts, both vectorised.  The second one
+    sorts a small unsigned group id (radix sort for up to 65535 groups),
+    which is far cheaper than a two-key ``lexsort`` on floats.
+
+    Parameters
+    ----------
+    coords : NDArrayFloat, shape (n, 2)
+        Point coordinates (``n >= 1``).
+    tol : float
+        Largest gap, per axis, still considered the same point.
+
+    Returns
+    -------
+    cluster_indices : NDArrayInt, shape (n,)
+        Cluster id of every point.  Ids are ordered lexicographically by
+        ``(x, y)``.
+    representatives : NDArrayFloat, shape (n_clusters, 2)
+        One coordinate per cluster, in cluster-id order.  All clusters of
+        an ``x`` group share that group's smallest ``x``, so rounding the
+        representatives preserves the strict lexicographic order.
+    """
+    x, y = coords[:, 0], coords[:, 1]
+
+    # x groups: sorted x values chained within tol.
+    by_x = np.argsort(x, kind="stable")
+    x_sorted = x[by_x]
+    new_x_group = np.concatenate(([False], np.diff(x_sorted) > tol))
+    group_of_sorted_x = np.cumsum(new_x_group)
+    x_group = np.empty(len(x), dtype=group_of_sorted_x.dtype)
+    x_group[by_x] = group_of_sorted_x
+
+    # Order by (x group, y): sort y, then stably sort the group id, stored
+    # in the smallest unsigned dtype that holds it so numpy radix-sorts it.
+    by_y = np.argsort(y, kind="stable")
+    small = x_group[by_y].astype(np.min_scalar_type(int(group_of_sorted_x[-1])))
+    order = by_y[np.argsort(small, kind="stable")]
+
+    # y clusters inside every x group: split on gaps or group change.
+    group_sorted = x_group[order]
+    y_sorted = y[order]
+    new_cluster = np.concatenate(
+        (
+            [True],
+            (group_sorted[1:] != group_sorted[:-1]) | (np.diff(y_sorted) > tol),
+        )
+    )
+    cluster_indices = np.empty(len(x), dtype=np.int64)
+    cluster_indices[order] = np.cumsum(new_cluster) - 1
+
+    # Representatives: smallest x of the group, smallest y of the cluster.
+    first_in_cluster = np.flatnonzero(new_cluster)
+    group_x_min = x_sorted[np.flatnonzero(np.concatenate(([True], new_x_group[1:])))]
+    representatives = np.column_stack(
+        (group_x_min[group_sorted[first_in_cluster]], y_sorted[first_in_cluster])
+    )
+    return cluster_indices, representatives
+
+
+def _vertex_clusters(
+    geom_array: NDArrayFloat, n_decimals: int
+) -> Tuple[NDArrayFloat, NDArrayInt, NDArrayInt, NDArrayFloat]:
+    """Array stage shared by the vertex and edge extractors.
+
+    Parameters
+    ----------
+    geom_array : NDArray of shapely.Polygon, shape (n_polys,)
+        Polygons whose vertices are extracted.
+    n_decimals : int
+        Vertices closer than ``10**-n_decimals`` along both axes are merged.
+
+    Returns
+    -------
+    coords : NDArrayFloat, shape (n_input_verts, 2)
+        Raw vertex coordinates, closing repeats dropped, in polygon order.
+    poly_indices : NDArrayInt, shape (n_input_verts,)
+        Polygon id of every input vertex.
+    cluster_indices : NDArrayInt, shape (n_input_verts,)
+        Deduplicated vertex id of every input vertex.
+    unique_coords : NDArrayFloat, shape (n_verts, 2)
+        Deduplicated vertex coordinates rounded to ``n_decimals``, in
+        lexicographic ``(x, y)`` order.
+    """
+    rings = shapely.get_rings(geom_array)  # single call
+    n_per_ring = shapely.get_num_coordinates(rings)
+    all_coords, poly_indices = shapely.get_coordinates(geom_array, return_index=True)
+
+    # drop closing repeat (last vertex of every ring)
+    drop = np.zeros(len(all_coords), dtype=bool)
+    drop[np.cumsum(n_per_ring) - 1] = True
+    coords = all_coords[~drop]
+    poly_indices = poly_indices[~drop]
+
+    # merge coincident vertices by gap clustering (no rounding grid, hence no
+    # rounding ties for float noise to fall on)
+    cluster_indices, representatives = _cluster_points(coords, 10.0**-n_decimals)
+    return (
+        coords,
+        poly_indices,
+        cluster_indices,
+        np.round(representatives, decimals=n_decimals),
+    )
+
+
 def extract_tiling_vertices(
     polygons: Union[shapely.MultiPolygon, Iterable[shapely.Polygon]],
     n_decimals: int = 2,
@@ -837,25 +964,26 @@ def extract_tiling_vertices(
     Extract the vertices of all polygons, deduplicating shared vertices.
 
     Vertices shared between adjacent polygons (identical coordinates up to
-    ``n_decimals`` decimal places) are merged into a single entry.  The
-    closing repeat of each exterior ring is dropped before deduplication.
-    Both adjacency mappings are built from the same
-    ``(cluster_indices, poly_indices)`` arrays so ``shapely.get_rings`` is
-    called only once.
+    ``10**-n_decimals``) are merged into a single entry.  The closing repeat
+    of each exterior ring is dropped before deduplication.  Both adjacency
+    mappings are built from the same ``(cluster_indices, poly_indices)``
+    arrays so ``shapely.get_rings`` is called only once.
 
-    Deduplication is performed on a single integer key per vertex, obtained
-    by scaling the rounded coordinates and packing ``(x, y)`` into one
-    ``int64``.  Sorting integers is markedly cheaper than sorting the void
-    dtype of a structured array, and the resulting order is the same
-    lexicographic ``(x, y)`` order.
+    Deduplication is a gap clustering (see :func:`_cluster_points`): two
+    vertices are the same point when they are chained within
+    ``10**-n_decimals`` along both axes.  Unlike snapping to a rounding
+    grid, this cannot be fooled by float noise on a rounding tie (e.g. a
+    coordinate of ``1.035`` computed as ``1.0349999999999999`` by one tile
+    and ``1.035`` by its neighbour).  Cost is two sorts of the vertices.
 
     Parameters
     ----------
     polygons : Union[shapely.MultiPolygon, Iterable[shapely.Polygon]]
         Polygons whose vertices are to be extracted.
     n_decimals : int, optional
-        Number of decimal places used when rounding coordinates before
-        hashing for duplicate removal.  By default ``2``.
+        Vertices closer than ``10**-n_decimals`` along both axes are merged,
+        and the returned coordinates are rounded to this many decimals.
+        By default ``2``.
 
     Returns
     -------
@@ -878,27 +1006,9 @@ def extract_tiling_vertices(
     else:
         geom_array = np.asarray(list(polygons))
 
-    rings = shapely.get_rings(geom_array)  # single call
-    n_per_ring = shapely.get_num_coordinates(rings)
-    all_coords, poly_indices = shapely.get_coordinates(geom_array, return_index=True)
-
-    # drop closing repeat (last vertex of every ring)
-    drop = np.zeros(len(all_coords), dtype=bool)
-    drop[np.cumsum(n_per_ring) - 1] = True
-    coords = all_coords[~drop]
-    poly_indices = poly_indices[~drop]
-
-    # quantise the coordinates on the rounding grid, shifted to non-negative
-    # values so the packing below is monotonic in x then y
-    key = np.rint(coords * 10.0**n_decimals).astype(np.int64)
-    key -= key.min(axis=0)
-
-    # pack (x, y) into a single integer and deduplicate
-    stride = int(key[:, 1].max()) + 1
-    code = key[:, 0] * stride + key[:, 1]
-    _, first, inverse = np.unique(code, return_index=True, return_inverse=True)
-    cluster_indices = inverse.ravel().astype(np.int64)
-    unique_coords = np.round(coords[first], decimals=n_decimals)
+    _, poly_indices, cluster_indices, unique_coords = _vertex_clusters(
+        geom_array, n_decimals
+    )
 
     # vertex → polygons, grouped in a single pass
     vert_to_polys = _pairs_to_adj(cluster_indices, poly_indices, len(unique_coords))
@@ -917,6 +1027,88 @@ def extract_tiling_vertices(
         cluster_indices,
         poly_to_verts,
     )
+
+
+def extract_tiling_edge_centers(
+    polygons: Union[shapely.MultiPolygon, Iterable[shapely.Polygon]],
+    n_decimals: int = 2,
+) -> Tuple[NDArrayFloat, Dict[int, List[int]], Dict[int, List[int]]]:
+    """
+    Extract the edge centres of all polygons, deduplicating shared edges.
+
+    The edge ``k`` of a polygon joins its ring vertex ``k`` to vertex
+    ``k + 1`` (the last edge wraps back to vertex ``0``).  Two edges are the
+    same edge when they join the same pair of *deduplicated vertices* (see
+    :func:`extract_tiling_vertices`), irrespective of direction, so an edge
+    shared by two adjacent tiles yields a single centre.  Deduplicating on
+    vertex-id pairs rather than on rounded midpoints keeps the topology
+    consistent with :func:`extract_tiling_vertices` and inherits its
+    immunity to rounding ties, while the returned coordinates are the exact
+    (unrounded) midpoints.
+
+    Cost is one vertex clustering plus one integer sort of the edge keys;
+    everything else is vectorised NumPy.  The per-vertex dictionaries of
+    :func:`extract_tiling_vertices` are not built.
+
+    Parameters
+    ----------
+    polygons : Union[shapely.MultiPolygon, Iterable[shapely.Polygon]]
+        Hole-free polygons (every tile built by this module is) whose edge
+        centres are to be extracted.
+    n_decimals : int, optional
+        Vertices closer than ``10**-n_decimals`` are merged, forwarded to
+        :func:`extract_tiling_vertices`.  By default ``2``.
+
+    Returns
+    -------
+    edge_centers : NDArrayFloat, shape (n_edges, 2)
+        Midpoints of the ``n_edges`` deduplicated edges, ordered by their
+        (min vertex id, max vertex id) key.
+    edge_to_polys : Dict[int, List[int]]
+        Deduplicated edge id -> sorted list of polygon ids sharing it.
+        Interior edges have two entries, boundary edges exactly one.
+    poly_to_edges : Dict[int, List[int]]
+        Polygon id -> deduplicated edge ids in ring order, i.e. entry ``k``
+        is the edge from ring vertex ``k`` to ring vertex ``k + 1``.  For a
+        rectangle, entries ``(0, 2)`` and ``(1, 3)`` are the opposite pairs.
+    """
+    if isinstance(polygons, shapely.MultiPolygon):
+        geom_array = np.array(polygons.geoms)
+    else:
+        geom_array = np.asarray(list(polygons))
+
+    n_polys = len(geom_array)
+    if n_polys == 0:
+        return np.empty((0, 2), dtype=float), {}, {}
+
+    coords, poly_indices, cluster, _ = _vertex_clusters(geom_array, n_decimals)
+
+    # Index of the next vertex along each ring, wrapping at the ring end.
+    n_per_poly = np.bincount(poly_indices, minlength=n_polys)
+    ends = np.cumsum(n_per_poly)
+    nxt = np.arange(len(coords)) + 1
+    nxt[ends - 1] = ends - n_per_poly
+
+    # Undirected edge key from the two vertex ids, then one sort to dedupe
+    # (a plain sort is far cheaper than np.unique with its index outputs).
+    va = cluster
+    vb = cluster[nxt]
+    code = np.minimum(va, vb) * (int(np.max(cluster)) + 1) + np.maximum(va, vb)
+    order = np.argsort(code, kind="stable")
+    sorted_code = code[order]
+    is_first = np.concatenate(([True], sorted_code[1:] != sorted_code[:-1]))
+    edge_id = np.empty(len(code), dtype=np.int64)
+    edge_id[order] = np.cumsum(is_first) - 1
+    first = order[is_first]  # stable sort: first occurrence of every edge
+
+    edge_centers = 0.5 * (coords[first] + coords[nxt[first]])
+
+    edge_to_polys = _pairs_to_adj(edge_id, poly_indices, len(first))
+    poly_to_edges = {
+        i: group.tolist() for i, group in enumerate(np.split(edge_id, ends[:-1]))
+    }
+
+    return edge_centers, edge_to_polys, poly_to_edges
 
 
 def adjacency_by_shared_vertices(

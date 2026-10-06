@@ -44,6 +44,7 @@ both the generated polygons and adjacency information between kept tiles.
    gen_polygonal_tiling
    extract_tiling_centers
    extract_tiling_vertices
+   extract_tiling_edge_centers
    adjacency_by_shared_vertices
    adjacency_to_edges
    draw_adjacency
@@ -136,6 +137,7 @@ from quickpaver._tiling import (
     PolygonType,
     adjacency_by_shared_vertices,
     extract_tiling_centers,
+    extract_tiling_edge_centers,
     extract_tiling_vertices,
     gen_hexagonal_tiling,
     gen_polygon,
@@ -189,6 +191,7 @@ __all__ = [
     "load_france_and_corsica_contour",
     "extract_tiling_centers",
     "extract_tiling_vertices",
+    "extract_tiling_edge_centers",
     "compute_transfer_matrix",
     "compute_transfer_matrix_with_intersections",
     "get_array_borders_selection",

@@ -14,6 +14,7 @@ from quickpaver._tiling import (
     SQRT3,
     Disk,
     PolygonType,
+    _cluster_points,
     _disk_mask_from_rings,
     _distance_to_convex_rings,
     _lattice_centres,
@@ -24,6 +25,7 @@ from quickpaver._tiling import (
     _tiles_from_centres,
     adjacency_by_shared_vertices,
     extract_tiling_centers,
+    extract_tiling_edge_centers,
     extract_tiling_vertices,
     gen_hexagonal_tiling,
     gen_polygon,
@@ -182,6 +184,13 @@ def test_pairs_to_adj_no_edges() -> None:
         1: [],
         2: [],
     }
+
+
+def test_pairs_to_adj_destinations_may_outnumber_nodes() -> None:
+    """Destination ids larger than ``n_nodes`` must not collide with sources."""
+    src = np.array([0, 0, 1, 1])
+    dst = np.array([5, 7, 5, 6])
+    assert _pairs_to_adj(src, dst, 2) == {0: [5, 7], 1: [5, 6]}
 
 
 def test_pairs_to_adj_deduplicates() -> None:
@@ -669,6 +678,277 @@ def test_extract_tiling_vertices_deduplicates_shared_corners() -> None:
     assert len(coords) == 6
     shared = [v for v, polys in vert_to_polys.items() if len(polys) == 2]
     assert len(shared) == 2
+
+
+def raw_vertex_clusters(polygons: Sequence[shapely.Polygon]) -> Dict[tuple, set]:
+    """Brute force: distinct vertex (snapped to a fine grid) -> polygon ids."""
+    clusters: Dict[tuple, set] = {}
+    for poly_id, poly in enumerate(polygons):
+        for vertex in np.round(np.array(poly.exterior.coords)[:-1], 6):
+            clusters.setdefault(tuple(vertex), set()).add(poly_id)
+    return clusters
+
+
+@pytest.mark.parametrize("poly_type", list(PolygonType))
+@pytest.mark.parametrize("edge_length", [0.9, 1.3])
+@pytest.mark.parametrize("anisotropy_ratio", [1.0, 1.15, 1.7, 2.3, 3.1, 4.6])
+def test_vertex_extraction_is_robust_to_rounding_ties(
+    lshape: shapely.Polygon,
+    poly_type: PolygonType,
+    edge_length: float,
+    anisotropy_ratio: float,
+) -> None:
+    """Vertices, edges and shared-vertex adjacency survive rounding ties.
+
+    Several of these lattices put coordinates exactly on a rounding tie
+    (e.g. ``1.035 * 100 = 103.5``), where ~1e-15 of float noise used to
+    send copies of the same corner to different buckets.
+    """
+    tiling, _ = GENERATORS[poly_type](lshape, edge_length, anisotropy_ratio)
+    polygons = list(tiling.geoms)
+    brute = raw_vertex_clusters(polygons)
+
+    vertices, vert_to_polys, _, _ = extract_tiling_vertices(polygons)
+    assert len(vertices) == len(brute)
+    assert sorted(map(tuple, map(sorted, vert_to_polys.values()))) == sorted(
+        tuple(sorted(v)) for v in brute.values()
+    )
+
+    rings = [np.array(p.exterior.coords)[:-1] for p in polygons]
+    n_edges = len(
+        np.unique(
+            np.round(np.vstack([0.5 * (r + np.roll(r, -1, axis=0)) for r in rings]), 6),
+            axis=0,
+        )
+    )
+    assert len(extract_tiling_edge_centers(polygons)[0]) == n_edges
+
+    expected_adjacency: Dict[int, set] = {i: set() for i in range(len(polygons))}
+    for ids in brute.values():
+        for i in ids:
+            expected_adjacency[i] |= ids - {i}
+    assert adjacency_by_shared_vertices(polygons) == {
+        i: sorted(v) for i, v in expected_adjacency.items()
+    }
+
+
+def test_vertex_merge_is_robust_to_rounding_ties(lshape: shapely.Polygon) -> None:
+    """Regression: 1.035 -> 103.5 used to split coincident vertices."""
+    tiling, _ = gen_rectangular_tiling(lshape, EDGE, 2.3)
+    polygons = list(tiling.geoms)
+    assert len(extract_tiling_vertices(polygons)[0]) == len(
+        raw_vertex_clusters(polygons)
+    )
+
+
+# --------------------------------------------------------------------------
+# Point clustering
+# --------------------------------------------------------------------------
+
+
+def test_cluster_points_ignores_float_noise_on_rounding_ties() -> None:
+    """Copies of a point differing by a few ulp stay together, ties included."""
+    # 0.005 + 0.05 * i: every coordinate sits exactly on a rounding tie at
+    # two decimals, while distinct points stay well above the tolerance.
+    base = np.array(
+        [[0.005 + 0.05 * i, 0.005 + 0.05 * j] for i in range(12) for j in range(6)]
+    )
+    noisy = base + np.array([0.0, 0.0])
+    noisy[::2] = np.nextafter(noisy[::2], -np.inf)
+    noisy[1::3] = np.nextafter(noisy[1::3], np.inf)
+    points = np.vstack([base, noisy])
+
+    clusters, representatives = _cluster_points(points, 0.01)
+    assert len(representatives) == len(base)
+    assert np.array_equal(clusters[: len(base)], clusters[len(base) :])
+
+
+def test_cluster_points_separates_distant_points_on_each_axis() -> None:
+    """Points far apart along x only, or along y only, are not merged."""
+    points = np.array([[0.0, 0.0], [5.0, 0.0], [0.0, 5.0], [5.0, 5.0], [0.001, 0.002]])
+    clusters, representatives = _cluster_points(points, 0.01)
+    assert len(representatives) == 4
+    assert clusters[0] == clusters[4]
+    assert len(set(clusters.tolist())) == 4
+
+
+def test_cluster_points_chains_within_tolerance() -> None:
+    """Points chained by gaps below the tolerance share a cluster."""
+    points = np.array([[0.0, 0.0], [0.006, 0.0], [0.012, 0.0], [0.5, 0.0]])
+    clusters, _ = _cluster_points(points, 0.01)
+    assert clusters.tolist() == [0, 0, 0, 1]
+
+
+def test_cluster_points_ids_and_representatives_are_lexicographic() -> None:
+    """Cluster ids and rounded representatives follow strict (x, y) order."""
+    rng = np.random.default_rng(1)
+    points = rng.integers(0, 40, size=(500, 2)) * 0.05 + rng.normal(0, 1e-12, (500, 2))
+    clusters, representatives = _cluster_points(points, 0.01)
+
+    rounded = np.round(representatives, 2)
+    assert np.array_equal(rounded, rounded[np.lexsort((rounded[:, 1], rounded[:, 0]))])
+    assert len({tuple(r) for r in rounded}) == len(rounded)
+    assert np.allclose(representatives[clusters], points, atol=1e-9)
+
+
+def test_cluster_points_large_coordinates() -> None:
+    """Projected-CRS magnitudes (millions of metres) cluster correctly."""
+    base = np.array(
+        [[5.0e6 + k * 0.45, 4.0e6 + j * 1.035] for k in range(6) for j in range(6)]
+    )
+    noisy = np.nextafter(base, np.inf)
+    _, representatives = _cluster_points(np.vstack([base, noisy]), 0.01)
+    assert len(representatives) == len(base)
+
+
+def test_cluster_points_many_groups() -> None:
+    """More than 65535 x groups still sort correctly (wider group dtype)."""
+    n = 70_000
+    points = np.column_stack([np.arange(n) * 0.5, np.zeros(n)])
+    clusters, representatives = _cluster_points(points, 0.01)
+    assert len(representatives) == n
+    assert np.array_equal(clusters, np.arange(n))
+
+
+# --------------------------------------------------------------------------
+# Edge-centre extraction
+# --------------------------------------------------------------------------
+
+
+def adjacency_from_edges(
+    edge_to_polys: Dict[int, List[int]], n_polys: int
+) -> Dict[int, List[int]]:
+    """Edge-sharing adjacency derived from the edge -> polygons mapping."""
+    adj: Dict[int, set] = {i: set() for i in range(n_polys)}
+    for polys in edge_to_polys.values():
+        for a in polys:
+            adj[a].update(b for b in polys if b != a)
+    return {i: sorted(v) for i, v in adj.items()}
+
+
+def test_extract_tiling_edge_centers_empty() -> None:
+    """No polygon yields no edge and empty mappings."""
+    centers, edge_to_polys, poly_to_edges = extract_tiling_edge_centers([])
+    assert centers.shape == (0, 2)
+    assert edge_to_polys == {}
+    assert poly_to_edges == {}
+
+
+def test_extract_tiling_edge_centers_deduplicates_shared_edge() -> None:
+    """Two touching squares have seven distinct edges, one of them shared."""
+    polygons = [shapely.box(0, 0, 1, 1), shapely.box(1, 0, 2, 1)]
+    centers, edge_to_polys, poly_to_edges = extract_tiling_edge_centers(polygons)
+
+    assert centers.shape == (7, 2)
+    shared = [e for e, polys in edge_to_polys.items() if len(polys) == 2]
+    assert len(shared) == 1
+    assert edge_to_polys[shared[0]] == [0, 1]
+    assert np.allclose(centers[shared[0]], [1.0, 0.5])
+    assert sum(len(v) for v in edge_to_polys.values()) == 8
+    assert all(len(v) == 4 for v in poly_to_edges.values())
+    assert shared[0] in poly_to_edges[0]
+    assert shared[0] in poly_to_edges[1]
+
+
+def test_extract_tiling_edge_centers_ring_order() -> None:
+    """Entry ``k`` of a polygon is the edge from vertex ``k`` to ``k + 1``."""
+    polygons = [shapely.box(0, 0, 2, 1)]
+    centers, _, poly_to_edges = extract_tiling_edge_centers(polygons)
+    ring = np.array(polygons[0].exterior.coords)[:-1]
+    expected = 0.5 * (ring + np.roll(ring, -1, axis=0))
+    assert np.allclose(centers[poly_to_edges[0]], expected)
+
+
+def test_extract_tiling_edge_centers_returns_unrounded_midpoints() -> None:
+    """Coordinates are exact midpoints, not the rounded merge keys."""
+    poly = shapely.Polygon([(0.0, 0.0), (0.123456, 0.0), (0.123456, 0.654321)])
+    centers, _, poly_to_edges = extract_tiling_edge_centers([poly])
+    assert np.allclose(centers[poly_to_edges[0][0]], [0.061728, 0.0], atol=1e-12)
+    assert np.allclose(centers[poly_to_edges[0][1]], [0.123456, 0.3271605], atol=1e-12)
+
+
+def test_extract_tiling_edge_centers_n_decimals() -> None:
+    """The vertex-merge tolerance is forwarded to the vertex extraction."""
+    polygons = [
+        shapely.box(0, 0, 1, 1),
+        shapely.Polygon([(1.0001, 0), (2, 0), (2, 1), (1.0001, 1)]),
+    ]
+    merged, _, _ = extract_tiling_edge_centers(polygons)
+    split, _, _ = extract_tiling_edge_centers(polygons, n_decimals=6)
+    assert len(merged) == 7
+    assert len(split) == 8
+
+
+@pytest.mark.parametrize("poly_type", list(PolygonType))
+@pytest.mark.parametrize("anisotropy_ratio", [1.0, 2.0])
+def test_extract_tiling_edge_centers_matches_brute_force(
+    lshape: shapely.Polygon, poly_type: PolygonType, anisotropy_ratio: float
+) -> None:
+    """Centres, topology and counts agree with a naive per-edge computation."""
+    tiling, adjacency = GENERATORS[poly_type](lshape, EDGE, anisotropy_ratio)
+    polygons = list(tiling.geoms)
+    centers, edge_to_polys, poly_to_edges = extract_tiling_edge_centers(polygons)
+
+    # Every polygon edge maps to a centre equal to its midpoint.
+    n_sides = 0
+    for poly_id, poly in enumerate(polygons):
+        ring = np.array(poly.exterior.coords)[:-1]
+        mids = 0.5 * (ring + np.roll(ring, -1, axis=0))
+        assert np.allclose(centers[poly_to_edges[poly_id]], mids, atol=1e-6)
+        n_sides += len(ring)
+
+    # The deduplicated centres are exactly the distinct midpoints (snapped to
+    # a grid far coarser than float noise but far finer than any tile).
+    all_mids = np.vstack(
+        [
+            0.5
+            * (
+                np.array(poly.exterior.coords)[:-1]
+                + np.roll(np.array(poly.exterior.coords)[:-1], -1, axis=0)
+            )
+            for poly in polygons
+        ]
+    )
+    assert len(centers) == len(np.unique(np.round(all_mids, 6), axis=0))
+
+    # Edges are shared by one (boundary) or two (interior) tiles.
+    assert {len(v) for v in edge_to_polys.values()} <= {1, 2}
+    assert sum(len(v) for v in edge_to_polys.values()) == n_sides
+
+    # The edge graph reproduces the structured edge-sharing adjacency.
+    assert adjacency_from_edges(edge_to_polys, len(polygons)) == adjacency
+
+
+def test_extract_tiling_edge_centers_accepts_multipolygon_and_iterables(
+    square: shapely.Polygon,
+) -> None:
+    """A multipolygon, a list and a generator all give the same result."""
+    tiling, _ = gen_hexagonal_tiling(square, 1.0)
+    from_multi = extract_tiling_edge_centers(tiling)
+    from_list = extract_tiling_edge_centers(list(tiling.geoms))
+    from_gen = extract_tiling_edge_centers(g for g in tiling.geoms)
+
+    for other in (from_list, from_gen):
+        assert np.array_equal(from_multi[0], other[0])
+        assert from_multi[1] == other[1]
+        assert from_multi[2] == other[2]
+
+
+def test_extract_tiling_edge_centers_rectangle_opposite_pairs() -> None:
+    """For a rectangle, entries (0, 2) and (1, 3) are the opposite edges."""
+    tiling, _ = gen_rectangular_tiling(shapely.box(0, 0, 4, 4), 1.0, 2.0)
+    polygons = list(tiling.geoms)
+    centers, _, poly_to_edges = extract_tiling_edge_centers(polygons)
+    centroids = extract_tiling_centers(polygons)
+
+    for poly_id, edges in poly_to_edges.items():
+        e0, e1, e2, e3 = centers[edges]
+        # Opposite edges are symmetric about the cell centre.
+        assert np.allclose(0.5 * (e0 + e2), centroids[poly_id])
+        assert np.allclose(0.5 * (e1 + e3), centroids[poly_id])
+        # Entries 0/2 are the horizontal edges (width 1, height 2).
+        assert np.allclose(e2 - e0, [0.0, 2.0])
+        assert np.allclose(e3 - e1, [-1.0, 0.0])
 
 
 def test_adjacency_by_shared_vertices_matches_structured(
