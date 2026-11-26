@@ -61,6 +61,9 @@ lint = [
     "codespell>=2.3",
     "pre-commit>=4",
     "pre-commit-hooks>=5",
+    # optional dependency (drawing helpers, notebooks): needed by ty to resolve
+    # the imports it type-checks
+    "matplotlib>=3.5",
 ]
 # The marimo notebooks are executed while building the documentation, so the
 # compiled package must be installed too (see .readthedocs.yml).
