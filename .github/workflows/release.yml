@@ -19,6 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  MPLBACKEND: Agg
   CARGO_TERM_COLOR: always
   UV_NO_PROGRESS: 1
   # CPython versions a wheel is built for ("t": free-threaded build).
