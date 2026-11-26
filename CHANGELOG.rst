@@ -40,7 +40,10 @@ Fixes:
 * FIX: the rectilinear / polygon transfer raised ``ValueError`` for convex polygons with
   more than 28 vertices (e.g. disk-clipped tiles); any polygon size is now supported.
 * FIX: ``import quickpaver`` failed when matplotlib was not installed although it was not
-  a declared dependency: matplotlib is now imported lazily and declared as a dependency.
+  a declared dependency. matplotlib is now optional (``pip install quickpaver[plot]``) and
+  only needed by the drawing helpers: the polygon selection functions of ``_grid`` use a
+  Rust port of matplotlib's point-in-polygon test (identical results, boundary points
+  included), so the package also installs where matplotlib has no wheel (e.g. musllinux).
 
 Packaging:
 

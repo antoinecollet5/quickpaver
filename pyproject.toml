@@ -13,7 +13,7 @@ keywords = ["Paving", "Tiling", "Triangle", "Hexagon", "Grid", "Rectilinear", "R
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.22", "shapely>=2.1", "scipy>=1.10", "matplotlib>=3.5"]
+dependencies = ["numpy>=1.22", "shapely>=2.1", "scipy>=1.10"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -45,9 +45,11 @@ Issues = "https://github.com/antoinecollet5/quickpaver/issues"
 Changelog = "https://github.com/antoinecollet5/quickpaver/blob/master/CHANGELOG.rst"
 
 [project.optional-dependencies]
+# drawing helpers (draw_adjacency, ...); the rest of the package needs no matplotlib
+plot = ["matplotlib>=3.5"]
 pyvista = ["pyvista"]
 examples = ["matplotlib", "marimo", "nested_grid_plotter>=2.1.0", "pyvista[all]"]
-all = ["quickpaver[pyvista,examples]"]
+all = ["quickpaver[plot,pyvista,examples]"]
 
 # Development dependencies (PEP 735): `uv sync` installs the `dev` group by default,
 # `pip install --group dev` works with pip >= 25.1.

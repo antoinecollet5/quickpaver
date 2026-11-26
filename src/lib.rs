@@ -352,6 +352,24 @@ fn classify_boxes<'py>(
     Ok(out.into_pyarray(py))
 }
 
+/// Point-in-polygon test, same results as matplotlib's
+/// `Path(vertices).contains_points(points)` (see `surface::points_in_polygon`).
+#[pyfunction]
+fn points_in_polygon<'py>(
+    py: Python<'py>,
+    px: PyReadonlyArray1<'py, f64>,
+    py_: PyReadonlyArray1<'py, f64>,
+    vx: PyReadonlyArray1<'py, f64>,
+    vy: PyReadonlyArray1<'py, f64>,
+) -> PyResult<Bound<'py, PyArray1<bool>>> {
+    let (a, b, c, d) = (s1(&px)?, s1(&py_)?, s1(&vx)?, s1(&vy)?);
+    if a.len() != b.len() || c.len() != d.len() {
+        return Err(PyValueError::new_err("x / y arrays differ in length"));
+    }
+    let out = py.detach(|| surface::points_in_polygon(a, b, c, d));
+    Ok(out.into_pyarray(py))
+}
+
 /// COO -> CSC arrays `(data, indices, indptr)` for *unique* (row, col) pairs.
 #[pyfunction]
 fn coo_to_csc<'py>(
@@ -393,5 +411,6 @@ fn _quickpaver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(polygon_convexity, m)?)?;
     m.add_function(wrap_pyfunction!(coo_to_csc, m)?)?;
     m.add_function(wrap_pyfunction!(classify_boxes, m)?)?;
+    m.add_function(wrap_pyfunction!(points_in_polygon, m)?)?;
     Ok(())
 }

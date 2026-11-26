@@ -19,15 +19,33 @@ import numpy as np
 import shapely
 from scipy.sparse import coo_array, csc_array
 
-from quickpaver._types import Int, NDArrayBool, NDArrayFloat, NDArrayInt
+from quickpaver._types import ArrayLike, Int, NDArrayBool, NDArrayFloat, NDArrayInt
 
 
-def _mpl_path():
-    """``matplotlib.path.Path``, imported on first use (keeps
-    ``import quickpaver`` fast)."""
-    from matplotlib.path import Path
+def _contains_points(vertices: ArrayLike, points: NDArrayFloat) -> NDArrayBool:
+    """
+    Whether each point of ``points`` (shape ``(n, 2)``) lies inside the
+    polygon ``vertices`` (shape ``(m, 2)``).
 
-    return Path
+    Same results as ``matplotlib.path.Path(vertices).contains_points(points)``
+    (points exactly on the boundary included), computed in the Rust extension:
+    matplotlib is not needed. Polygons with non-finite vertices, which
+    matplotlib splits into several sub-paths, are still delegated to it.
+    """
+    from quickpaver._transfer_matrix import _rs
+
+    v = np.asarray(vertices, dtype=np.float64).reshape(-1, 2)
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if not np.isfinite(v).all():  # pragma: no cover - rare, matplotlib semantics
+        from matplotlib.path import Path
+
+        return Path(v).contains_points(pts)
+    return _rs.points_in_polygon(
+        np.ascontiguousarray(pts[:, 0]),
+        np.ascontiguousarray(pts[:, 1]),
+        np.ascontiguousarray(v[:, 0]),
+        np.ascontiguousarray(v[:, 1]),
+    )
 
 
 def rlg_idx_to_nn(
@@ -1560,9 +1578,8 @@ def create_selections_array_2d(
     mask_sum: Optional[NDArrayBool] = None
     for _polygon, cell_id in zip(polygons, _sel_ids):
         # Select the mesh that belongs to the polygon
-        path = _mpl_path()(_polygon)
-        mask = path.contains_points(
-            grid.center_coords[:2, :, :, 0].reshape(2, -1, order="F").T
+        mask = _contains_points(
+            _polygon, grid.center_coords[:2, :, :, 0].reshape(2, -1, order="F").T
         )
         if mask_sum is not None:
             mask = np.logical_and(mask, ~mask_sum)
@@ -1582,9 +1599,8 @@ def _get_mask(
     polygon, selection: NDArrayInt, center_coords_2d: NDArrayFloat, nx: int, ny: int
 ) -> NDArrayBool:
     # Select the mesh that belongs to the polygon
-    path = _mpl_path()(polygon)
     mask = np.reshape(
-        path.contains_points(center_coords_2d),
+        _contains_points(polygon, center_coords_2d),
         (nx, ny),
         "F",
     )
@@ -1712,9 +1728,7 @@ def get_polygon_selection_with_dilation_2d(
     # not depend on the selection state, so it is invariant across dilation
     # iterations).
     containment_masks = [
-        _mpl_path()(vertices)
-        .contains_points(_grid_coords_2d)
-        .reshape(grid.nx, grid.ny, order="F")
+        _contains_points(vertices, _grid_coords_2d).reshape(grid.nx, grid.ny, order="F")
         for vertices in polygons
     ]
 
@@ -1822,9 +1836,7 @@ def get_polygon_selection_with_dilation_3d(
         for i in range(len(polygons))
     ]
     containment_masks = [
-        _mpl_path()(vertices)
-        .contains_points(_grid_coords_2d)
-        .reshape(grid.nx, grid.ny, order="F")
+        _contains_points(vertices, _grid_coords_2d).reshape(grid.nx, grid.ny, order="F")
         for vertices in polygons
     ]
 

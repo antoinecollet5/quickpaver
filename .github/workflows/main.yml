@@ -138,7 +138,7 @@ jobs:
         shell: bash
         run: |
           uv venv --managed-python --python "${{ matrix.python }}"
-          uv pip install --only-binary numpy,shapely,scipy,matplotlib -e . --group test
+          uv pip install --only-binary numpy,shapely,scipy -e . --group test
 
       - name: Install the optional test dependencies (when available for this Python / platform)
         shell: bash

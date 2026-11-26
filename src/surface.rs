@@ -192,6 +192,46 @@ impl SurfaceGrid {
     }
 }
 
+/// Point-in-polygon test with exactly the semantics of matplotlib's
+/// `Path(vertices).contains_points(points)` (radius 0, no transform) for a
+/// single polygon of finite vertices: the Haines crossing test of
+/// `matplotlib/src/_path.h::point_in_path_impl`, same comparisons and the same
+/// floating-point expressions, so points on edges / vertices are classified
+/// identically. Non-finite points are outside; fewer than 3 vertices -> none.
+pub fn points_in_polygon(px: &[f64], py: &[f64], vx: &[f64], vy: &[f64]) -> Vec<bool> {
+    let n = vx.len();
+    if n < 3 {
+        return vec![false; px.len()];
+    }
+    px.par_iter()
+        .zip(py.par_iter())
+        .with_min_len(1024)
+        .map(|(&tx, &ty)| {
+            if !(tx.is_finite() && ty.is_finite()) {
+                return false;
+            }
+            let mut inside = false;
+            // edges v[k-1] -> v[k] for k = 1..n, then the closing edge v[n-1] -> v[0]
+            let mut yflag0 = vy[0] >= ty;
+            for k in 1..=n {
+                let (x0, y0) = (vx[k - 1], vy[k - 1]);
+                let (x1, y1) = if k == n {
+                    (vx[0], vy[0])
+                } else {
+                    (vx[k], vy[k])
+                };
+                let yflag1 = y1 >= ty;
+                if yflag0 != yflag1 && (((y1 - ty) * (x0 - x1) >= (x1 - tx) * (y0 - y1)) == yflag1)
+                {
+                    inside = !inside;
+                }
+                yflag0 = yflag1;
+            }
+            inside
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +251,16 @@ mod tests {
         assert_eq!(g.classify([20.0, 20.0, 21.0, 21.0]), OUTSIDE);
         assert_eq!(g.classify([9.5, 5.0, 10.5, 5.5]), AMBIGUOUS); // crosses the border
         assert_eq!(g.classify([10.0, 5.0, 11.0, 5.5]), AMBIGUOUS); // touches it
+    }
+
+    #[test]
+    fn point_in_polygon_square() {
+        let (vx, vy) = ([0.0, 2.0, 2.0, 0.0], [0.0, 0.0, 2.0, 2.0]);
+        let r = points_in_polygon(&[1.0, 3.0, f64::NAN], &[1.0, 1.0, 1.0], &vx, &vy);
+        assert_eq!(r, vec![true, false, false]);
+        assert_eq!(
+            points_in_polygon(&[1.0], &[1.0], &vx[..2], &vy[..2]),
+            vec![false]
+        );
     }
 }

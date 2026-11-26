@@ -53,7 +53,7 @@ jobs:
       - name: Build from the sdist and test
         run: |
           uv venv --managed-python --python 3.13
-          uv pip install --only-binary numpy,shapely,scipy,matplotlib pytest dist/*.tar.gz
+          uv pip install --only-binary numpy,shapely,scipy pytest dist/*.tar.gz
           mkdir sdist-test && tar -xzf dist/*.tar.gz -C sdist-test --strip-components=1
           cd sdist-test && ../.venv/bin/python -m pytest -q -p no:cacheprovider
 
@@ -98,7 +98,9 @@ jobs:
         if: matrix.libc == 'musl'
         run: |
           docker run --rm -v "$PWD:/io" -w /io python:3.14-alpine sh -euc '
-            pip install --root-user-action=ignore -q --only-binary=:all: numpy shapely scipy matplotlib pytest
+            pip install --root-user-action=ignore -q --only-binary=:all: numpy shapely scipy pytest
+            # matplotlib has no musllinux wheels: the plotting tests are skipped
+            pip install --root-user-action=ignore -q --only-binary=:all: matplotlib || true
             pip install --root-user-action=ignore -q --no-index --no-deps --find-links dist quickpaver
             python -m pytest -q -p no:cacheprovider tests'
 
