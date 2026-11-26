@@ -827,7 +827,7 @@ def extract_tiling_centers(
           polygons.
     """
     if isinstance(polygons, shapely.MultiPolygon):
-        geom_array = np.array(polygons.geoms)
+        geom_array = shapely.get_parts(polygons)
     else:
         geom_array = np.asarray(list(polygons))
     centroids = shapely.centroid(geom_array)
@@ -1002,7 +1002,7 @@ def extract_tiling_vertices(
         Polygon id → deduplicated vertex ids in ring order.
     """
     if isinstance(polygons, shapely.MultiPolygon):
-        geom_array = np.array(polygons.geoms)
+        geom_array = shapely.get_parts(polygons)
     else:
         geom_array = np.asarray(list(polygons))
 
@@ -1073,7 +1073,7 @@ def extract_tiling_edge_centers(
         rectangle, entries ``(0, 2)`` and ``(1, 3)`` are the opposite pairs.
     """
     if isinstance(polygons, shapely.MultiPolygon):
-        geom_array = np.array(polygons.geoms)
+        geom_array = shapely.get_parts(polygons)
     else:
         geom_array = np.asarray(list(polygons))
 
