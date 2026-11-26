@@ -2,7 +2,7 @@
 Changelog
 ==============
 
-0.7.0 (unreleased)
+0.7.0 (2026-11-26)
 ------------------
 
 Performance (no API change; results are bit-identical to 0.6.0 except where noted):
