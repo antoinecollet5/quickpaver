@@ -29,9 +29,10 @@ def _():
 
     import matplotlib.pyplot as plt
     import nested_grid_plotter as ngp
-    import quickpaver
     import shapely
     from shapely.plotting import plot_polygon
+
+    import quickpaver
 
     return Optional, Union, ngp, plot_polygon, plt, quickpaver, shapely
 

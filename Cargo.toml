@@ -1,0 +1,28 @@
+[package]
+name = "quickpaver"
+version = "0.7.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Rust kernels of quickpaver: conservative transfer matrices between polygonal grids."
+license = "BSD-3-Clause"
+repository = "https://github.com/antoinecollet5/quickpaver"
+readme = "README.rst"
+publish = false
+
+[lib]
+name = "_quickpaver"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# `extension-module` is enabled by maturin (see pyproject.toml), not here, so that
+# `cargo test` can link against libpython.
+pyo3 = "0.29"
+numpy = "0.29"
+ndarray = "0.17"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

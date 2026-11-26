@@ -2,139 +2,188 @@ name: CI
 
 on:
   push:
-    # on every branch
-    branches:
-      - '**'
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
-  QT_DEBUG_PLUGINS: 1
-  QT_QPA_PLATFORM: offscreen
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  UV_NO_PROGRESS: 1
 
 jobs:
-  static_analysis:
-    runs-on: ubuntu-22.04
+  lint:
+    name: Lint (ruff, ty, codespell, rustfmt, clippy) and Rust tests
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: 3.14
+          persist-credentials: false
 
-      - name: Install dependencies with uv
-        run: |
-          pip install uv
-          uv venv
-          uv pip install -e ".[all]"
-
-      - name: Run pre-commit hooks
-        run: |
-          uv run pre-commit run --all-files  # Run pre-commit inside the uv virtual environment
-
-        continue-on-error: false
-
-      - name: Upload pre-commit report
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v6
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          name: pre-commit-report
-          path: pre-commit-report
+          # Pinned so that new clippy lints (every Rust release) don't break CI
+          # unexpectedly: bump it deliberately and fix the new warnings.
+          toolchain: "1.100"
+          components: rustfmt, clippy
 
-  tests:
-    runs-on: ubuntu-22.04
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning] CI only; releases build without caches
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+
+      - name: Install the project and the dev tools
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: uv sync --python "$PYTHON"
+
+      - name: ruff check
+        run: uv run --no-sync ruff check --output-format=github .
+
+      - name: ruff format
+        run: uv run --no-sync ruff format --check --diff .
+
+      - name: ty
+        run: uv run --no-sync ty check --output-format=github
+
+      - name: codespell
+        run: uv run --no-sync codespell python tests src docs/sources README.rst CHANGELOG.rst CONTRIBUTING.rst
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Rust tests
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          export LD_LIBRARY_PATH="$("$PYO3_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          cargo test --release
+
+  docs:
+    name: Documentation (Sphinx, notebooks executed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning] CI only; releases build without caches
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+
+      - name: Install the package and the documentation dependencies
+        run: |
+          uv venv --python 3.13
+          uv pip install --group docs .
+
+      - name: Build the documentation
+        run: uv run --no-sync python -m sphinx --keep-going -b html docs/sources docs/build/html
+
+  test:
+    name: Test ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-        numba-variant: ["with-numba", "without-numba"]
-
-    env:
-      NUMBA_DISABLE_JIT: 1
-
-    needs:
-      - static_analysis
-
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        python: ["3.10", "3.12", "3.14", "3.15", "3.15t"]
+        include:
+          # Intel macOS and Windows ARM64: newest Python only.
+          - os: macos-15-intel
+            python: "3.15"
+          - os: windows-11-arm
+            python: "3.15"
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: ${{ matrix.python-version }}
+          persist-credentials: false
 
-      - name: Install uv + deps
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning] CI only; releases build without caches
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+
+      - name: Build and install (editable, release mode)
+        shell: bash
         run: |
-          pip install uv
-          uv venv
-          uv pip install -e ".[all]"
+          uv venv --managed-python --python "${{ matrix.python }}"
+          uv pip install --only-binary numpy,shapely,scipy,matplotlib -e . --group test
 
-      - name: Uninstall numba for 'without-numba' variant
-        if: matrix.numba-variant == 'without-numba'
+      - name: Install the optional test dependencies (when available for this Python / platform)
+        shell: bash
         run: |
-          uv pip uninstall -y numba
+          uv pip install --only-binary :all: pyvista matplotlib || echo "::notice::PyVista / matplotlib not available, their tests are skipped"
 
-      - name: Run tests with coverage
+      - name: Run tests
+        shell: bash
         env:
-          COVERAGE_FILE: .coverage.${{ matrix.python-version }}.${{ matrix.numba-variant }}
-        run: |
-          uv run pytest \
-            --cov=quickpaver \
-            --cov-config=.coveragerc \
-            --cov-report=term \
-            --color=yes
+          COVERAGE_FILE: .coverage.${{ matrix.os }}.${{ matrix.python }}
+        run: uv run --no-sync pytest --cov=quickpaver --cov-config=.coveragerc --cov-report=term --color=yes
 
-      - name: find
-        run: find . -type f -name '.coverage*'
-
-      - name: Upload coverage artifact
-        if: always()
-        uses: actions/upload-artifact@v7
+      - name: Upload coverage data
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: coverage-${{ matrix.python-version }}-${{ matrix.numba-variant }}
-          path: ${{ github.workspace }}/.coverage.${{ matrix.python-version }}.${{ matrix.numba-variant }}
+          name: coverage-${{ matrix.os }}-${{ matrix.python }}
+          path: .coverage.${{ matrix.os }}.${{ matrix.python }}
           include-hidden-files: true
           if-no-files-found: error
 
-
-  coverage-merge:
-    runs-on: ubuntu-22.04
-    needs:
-      - tests
-
+  coverage:
+    name: Combine coverage
+    runs-on: ubuntu-latest
+    needs: test
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: 3.14
+          persist-credentials: false
 
-      - name: Install coverage
-        run: pip install coverage
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
 
-      - name: Download all coverage artifacts
-        uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: coverage-*
+          merge-multiple: true
           path: coverage-data
-
-      - name: List downloaded coverage files
-        run: |
-          echo "=== All downloaded files ==="
-          find coverage-data -type f | head -20
-          echo ""
-          echo "=== Coverage files ==="
-          find coverage-data -name '.coverage*' -print
 
       - name: Combine coverage
         run: |
-          coverage combine $(find coverage-data -name '.coverage*')
-          coverage report -m
-          coverage html
-          coverage xml
+          uvx coverage combine --rcfile=.coveragerc coverage-data/.coverage.*
+          uvx coverage report --rcfile=.coveragerc -m
+          uvx coverage xml --rcfile=.coveragerc
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
+          fail_ci_if_error: false

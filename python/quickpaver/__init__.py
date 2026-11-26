@@ -42,6 +42,7 @@ both the generated polygons and adjacency information between kept tiles.
    gen_rectangular_tiling
    gen_triangular_tiling
    gen_polygonal_tiling
+   gen_polygonal_tiling_arrays
    extract_tiling_centers
    extract_tiling_vertices
    extract_tiling_edge_centers
@@ -60,6 +61,8 @@ geometries.
 
    compute_transfer_matrix
    compute_transfer_matrix_with_intersections
+   compute_transfer_matrix_with_intersection_vertices
+   IntersectionVertices
 
 Test data
 ^^^^^^^^^
@@ -142,12 +145,15 @@ from quickpaver._tiling import (
     gen_hexagonal_tiling,
     gen_polygon,
     gen_polygonal_tiling,
+    gen_polygonal_tiling_arrays,
     gen_rectangular_tiling,
     gen_triangular_tiling,
     intersects_mask,
 )
 from quickpaver._transfer_matrix import (
+    IntersectionVertices,
     compute_transfer_matrix,
+    compute_transfer_matrix_with_intersection_vertices,
     compute_transfer_matrix_with_intersections,
 )
 from quickpaver.data import (
@@ -167,6 +173,7 @@ __all__ = [
     "gen_rectangular_tiling",
     "gen_triangular_tiling",
     "gen_polygonal_tiling",
+    "gen_polygonal_tiling_arrays",
     "Grid",
     "RectilinearGrid",
     "TriMesh",
@@ -192,7 +199,9 @@ __all__ = [
     "extract_tiling_centers",
     "extract_tiling_vertices",
     "extract_tiling_edge_centers",
+    "IntersectionVertices",
     "compute_transfer_matrix",
+    "compute_transfer_matrix_with_intersection_vertices",
     "compute_transfer_matrix_with_intersections",
     "get_array_borders_selection",
     "intersects_mask",

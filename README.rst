@@ -16,7 +16,15 @@ Designing paving layouts (aka tiling) often requires repetitive geometric calcul
 
 This package aims to simplify and automate the generation of paving layouts by providing a programmatic way to create and manipulate classic paving patterns.
 
-The implementation relies on `Shapely <https://shapely.readthedocs.io/en/stable/>`_ for geometric operations and leverages the `GEOS <https://libgeos.org/>`_ engine’s vectorization capabilities. This allows many geometric computations to be performed efficiently, enabling the generation and processing of large numbers of paving elements with good performance. As a result, the package provides both flexibility and speed, making it suitable for practical design tasks as well as research and experimentation.
+The geometry kernels (polygon clipping, candidate search, tile selection) are written in
+`Rust <https://www.rust-lang.org/>`_ and run in parallel without holding the GIL, while the
+results are exposed as `Shapely <https://shapely.readthedocs.io/en/stable/>`_ geometries and
+`SciPy <https://scipy.org/>`_ sparse matrices. Prebuilt wheels are provided for CPython 3.10
+to 3.15 (including the free-threaded builds) on Linux, macOS and Windows, so no compiler is
+needed to install the package. Functions such as
+``compute_transfer_matrix_with_intersection_vertices`` and ``gen_polygonal_tiling_arrays``
+also return plain NumPy arrays for very large problems, where creating millions of Shapely
+objects would dominate the run time.
 
 ===============
 🚀 Quick start
@@ -34,13 +42,15 @@ Or alternatively using `conda`
 
     conda install quickpaver[examples]
 
-You might also clone the repository and install from source
+You might also clone the repository and install from source, which requires a
+`Rust toolchain <https://rustup.rs>`_ (the extension is compiled by
+`maturin <https://www.maturin.rs>`_):
 
 .. code-block::
 
     pip install -e .[examples]
 
-Once the installation is done, `quickpaver` is straighforward to use and proposes.
+Once the installation is done, `quickpaver` is straightforward to use and proposes.
 In this tutorial, we will see how to generate tiling using rectangles, triangles
 and hexagons. We will also play with anisotropy and angles.
 
@@ -444,7 +454,7 @@ TODO
 
 .. |Downloads| image:: https://static.pepy.tech/badge/quickpaver
     :target: https://pepy.tech/project/quickpaver
-    :alt: Downoads
+    :alt: Downloads
 
 .. |Build Status| image:: https://github.com/antoinecollet5/quickpaver/actions/workflows/main.yml/badge.svg
     :target: https://github.com/antoinecollet5/quickpaver/actions/workflows/main.yml

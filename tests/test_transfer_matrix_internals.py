@@ -4,27 +4,24 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import quickpaver
 import shapely
+from scipy.sparse import csc_array
+
+import quickpaver
 from quickpaver import RectilinearGrid, TriMesh
 from quickpaver._tm_test_utils import (
     make_grid_trimesh,
     make_regular_grid,
     regular_ngon,
-    square_with_hole,
 )
 from quickpaver._transfer_matrix import (
-    _bbox_candidate_ranges_in_rectilinear_grid,
     _check_intersections_alignment,
     _compute_1d_overlaps,
     _no_intersections,
     _nonseparable_transfer,
     _pack_intersections,
-    _polygons_from_padded_verts,
-    _PolygonVertexData,
     _validate_mask,
 )
-from scipy.sparse import csc_array
 
 # ---------------------------------------------------------------------------
 # Masks on paths the original test files never exercised
@@ -301,104 +298,6 @@ class TestNonseparableTransferDirect:
         assert len(tgt_lin) == 0
         assert len(weights) == 0
         assert len(intersections) == 0
-
-
-class TestPolygonVertexDataDirect:
-    def test_empty_batch(self) -> None:
-        pvd = _PolygonVertexData(np.asarray([], dtype=object))
-        assert len(pvd.x) == 0
-        assert len(pvd.starts) == 0
-        assert pvd.max_verts == 0
-
-        bx0, bx1, by0, by1 = pvd.local_frame_bboxes(np.array([0.0, 0.0]), 0.0)
-        assert len(bx0) == len(bx1) == len(by0) == len(by1) == 0
-
-        vx, vy = pvd.padded_vertex_buffers(8)
-        assert vx.shape == (0, 8)
-        assert vy.shape == (0, 8)
-
-        conv = pvd.convexity()
-        assert len(conv) == 0
-
-    def test_nonempty_batch_basic_fields(self) -> None:
-        polys = np.asarray(
-            [shapely.box(0, 0, 1, 1), shapely.Polygon([(0, 0), (2, 0), (1, 1)])],
-            dtype=object,
-        )
-        pvd = _PolygonVertexData(polys)
-        assert pvd.max_verts == 4
-        np.testing.assert_array_equal(pvd.true_n, [4, 3])
-        assert not pvd.has_holes.any()
-        conv = pvd.convexity()
-        assert conv.all()
-
-    def test_holed_polygon_is_not_convex(self) -> None:
-        polys = np.asarray([square_with_hole(0.0, 0.0, 2.0)], dtype=object)
-        pvd = _PolygonVertexData(polys)
-        assert pvd.has_holes[0]
-        assert not pvd.convexity()[0]
-
-
-class TestBboxCandidateRangesDirect:
-    def test_empty_items_returns_empty(self) -> None:
-        item_idx, cell_i, cell_j = _bbox_candidate_ranges_in_rectilinear_grid(
-            bbox_xmin=np.array([]),
-            bbox_xmax=np.array([]),
-            bbox_ymin=np.array([]),
-            bbox_ymax=np.array([]),
-            x_edges=np.array([0.0, 1.0, 2.0]),
-            y_edges=np.array([0.0, 1.0, 2.0]),
-            nx=2,
-            ny=2,
-        )
-        assert len(item_idx) == len(cell_i) == len(cell_j) == 0
-
-    def test_normal_case(self) -> None:
-        item_idx, cell_i, cell_j = _bbox_candidate_ranges_in_rectilinear_grid(
-            bbox_xmin=np.array([0.2]),
-            bbox_xmax=np.array([0.8]),
-            bbox_ymin=np.array([0.2]),
-            bbox_ymax=np.array([0.8]),
-            x_edges=np.array([0.0, 1.0, 2.0]),
-            y_edges=np.array([0.0, 1.0, 2.0]),
-            nx=2,
-            ny=2,
-        )
-        assert len(item_idx) == 1
-        assert cell_i[0] == 0
-        assert cell_j[0] == 0
-
-
-class TestPolygonsFromPaddedVertsDirect:
-    def test_all_invalid_returns_all_none(self) -> None:
-        n_verts = np.array([0, 1, 2])
-        vx = np.zeros((3, 4))
-        vy = np.zeros((3, 4))
-        polys = _polygons_from_padded_verts(vx, vy, n_verts)
-        assert len(polys) == 3
-        assert all(p is None for p in polys)
-
-    def test_mixed_valid_and_invalid(self) -> None:
-        n_verts = np.array([0, 4])
-        vx = np.zeros((2, 4))
-        vy = np.zeros((2, 4))
-        vx[1] = [0.0, 1.0, 1.0, 0.0]
-        vy[1] = [0.0, 0.0, 1.0, 1.0]
-        polys = _polygons_from_padded_verts(vx, vy, n_verts)
-        assert polys[0] is None
-        assert isinstance(polys[1], shapely.Polygon)
-        assert polys[1].area == pytest.approx(1.0)
-
-    def test_world_transform_applied(self) -> None:
-        n_verts = np.array([4])
-        vx = np.array([[0.0, 1.0, 1.0, 0.0]])
-        vy = np.array([[0.0, 0.0, 1.0, 1.0]])
-        polys = _polygons_from_padded_verts(
-            vx, vy, n_verts, local_to_world=(np.array([10.0, 20.0]), 1.0, 0.0)
-        )
-        cx, cy = polys[0].centroid.x, polys[0].centroid.y
-        assert cx == pytest.approx(10.5)
-        assert cy == pytest.approx(20.5)
 
 
 class TestNoIntersectionsAndPack:

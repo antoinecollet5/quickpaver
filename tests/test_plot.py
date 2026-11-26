@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-from matplotlib.axes import Axes
-from matplotlib.collections import LineCollection
-from matplotlib.lines import Line2D
+
+pytest.importorskip("matplotlib")
+
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.axes import Axes  # noqa: E402
+from matplotlib.collections import LineCollection  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
+
 from quickpaver._plot import (
     _draw_edges,
     _edges_to_segments,

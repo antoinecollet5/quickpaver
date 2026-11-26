@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import quickpaver
 import shapely
 from scipy.sparse import csc_array
+
+import quickpaver
 
 # ---------------------------------------------------------------------------
 # Helpers

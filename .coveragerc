@@ -1,0 +1,23 @@
+[run]
+branch = True
+source = quickpaver
+relative_files = True
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+
+[paths]
+# Map the files measured on each runner (editable install -> repository checkout,
+# regular install -> site-packages, any OS) onto the sources of the merge job.
+source =
+    python/quickpaver
+    */python/quickpaver
+    *\python\quickpaver
+    */site-packages/quickpaver
+    *\site-packages\quickpaver

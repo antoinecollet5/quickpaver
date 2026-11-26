@@ -1,21 +1,15 @@
-.PHONY: clean clean-test clean-pyc clean-build docs help
+.PHONY: clean clean-test clean-pyc clean-build help install-dev
 .DEFAULT_GOAL := help
 
 define BROWSER_PYSCRIPT
 import os, webbrowser, sys
-
 from urllib.request import pathname2url
-
 webbrowser.open("file://" + pathname2url(os.path.abspath(sys.argv[1])))
 endef
 export BROWSER_PYSCRIPT
 
-# need to deactivate jit so that coverage accounts for numba jitted code
-export NUMBA_DISABLE_JIT := 1
-
 define PRINT_HELP_PYSCRIPT
 import re, sys
-
 for line in sys.stdin:
 	match = re.match(r'^([a-zA-Z_-]+):.*?## (.*)$$', line)
 	if match:
@@ -31,60 +25,63 @@ help:
 
 clean: clean-build clean-pyc clean-test ## remove all build, test, coverage and Python artifacts
 
-clean-build: ## remove build artifacts
-	rm -fr build/
-	rm -fr _autosummary/
-	rm -fr dist/
-	rm -fr .eggs/
-	find . -name '*.egg-info' -exec rm -fr {} +
-	find . -name '*.egg' -exec rm -f {} +
+# Only the project's own folders are cleaned: never the virtual environment (.venv).
+SRC_DIRS := python tests notebooks benchmarks
+
+clean-build: ## remove build artifacts (including the compiled extension of the dev install)
+	rm -fr build/ dist/ .eggs/ target/wheels/
+	find $(SRC_DIRS) -name '*.egg-info' -exec rm -fr {} + 2>/dev/null || true
+	rm -f python/quickpaver/_quickpaver*.so python/quickpaver/_quickpaver*.pyd
 
 clean-pyc: ## remove Python file artifacts
-	find . -name '*.pyc' -exec rm -f {} +
-	find . -name '*.pyo' -exec rm -f {} +
-	find . -name '*~' -exec rm -f {} +
-	find . -name '__pycache__' -exec rm -fr {} +
+	find $(SRC_DIRS) \( -name '*.pyc' -o -name '*.pyo' -o -name '*~' \) -exec rm -f {} +
+	find $(SRC_DIRS) \( -name '__pycache__' -o -name '__marimo__' \) -exec rm -fr {} + 2>/dev/null || true
 
 clean-test: ## remove test and coverage artifacts
-	rm -fr .tox/
-	rm -f .coverage
-	rm -fr htmlcov/
-	rm -fr .pytest_cache
-	rm -fr .ruff_cache
+	rm -fr .tox/ .coverage .coverage.* htmlcov/ .pytest_cache .ruff_cache
+	rm -fr docs/build/ docs/sources/_autosummary/
 
-test: ## run tests quickly with the default Python
-	pytest
+install-dev: ## install the package and the dev tools (rebuilds the extension when the Rust code changed)
+	uv sync
 
-tox: ## check code coverage quickly with the default Python
-	tox
-	coverage combine
-	coverage report -m
-	coverage html
+build: ## build a release wheel for the current platform
+	uv run maturin build --release
+
+test: ## run the Python and Rust tests
+	uv run pytest
+	cargo test --release
+
+test-cov: ## run tests with coverage report
+	uv run pytest --cov=quickpaver --cov-report=html --cov-report=term
 	$(BROWSER) htmlcov/index.html
 
-coverage: ## check code coverage quickly with the default Python
-	coverage run --source quickpaver -m pytest
-	coverage report -m
-	coverage html
-	$(BROWSER) htmlcov/index.html
+lint: ## lint and format-check everything (ruff, ty, codespell, rustfmt, clippy)
+	uv run ruff check .
+	uv run ruff format --check .
+	uv run ty check
+	uv run codespell python tests src docs/sources README.rst CHANGELOG.rst CONTRIBUTING.rst
+	cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
 
-docs: ## generate Sphinx HTML documentation, including API docs
-	rm -fr docs/build/
-	rm -fr docs/sources/_autosummary/
-	marimo export ipynb notebooks/regular_paving_examples.py -o notebooks/regular_paving_examples.ipynb --sort=top-down
-	$(MAKE) -C docs clean
-	$(MAKE) -C docs html
+format: ## auto-fix lint issues and format the code
+	uv run ruff check --fix .
+	uv run ruff format .
+	cargo fmt
+
+dist: ## build the sdist and a release wheel for the current platform
+	rm -fr dist/
+	uv run maturin sdist -o dist
+	uv run maturin build --release -o dist
+	ls -lh dist/
+
+docs: ## generate the Sphinx HTML documentation, including the API reference
+	rm -fr docs/build/ docs/sources/_autosummary/
+	uv run --only-group docs python -m sphinx -W --keep-going -b html docs/sources docs/build/html
 	$(BROWSER) docs/build/html/index.html
 
-servedocs: docs ## compile the docs watching for changes
-	watchmedo shell-command -p '*.rst' -c '$(MAKE) -C docs html' -R -D .
+benchmark: ## run the transfer-matrix and tiling benchmarks
+	uv run python benchmarks/run_bench.py
+	uv run python benchmarks/tilebench.py
 
-release: dist ## package and upload a release
-	twine upload dist/*
-
-dist: clean ## builds source and wheel package
-	python -m build --sdist --wheel
-	ls -l dist
-
-install: clean ## install the package to the active Python's site-packages
-	python setup.py install
+.PHONY: all build test test-cov lint format dist docs benchmark
+all: lint test dist ## lint, test and build the distributions

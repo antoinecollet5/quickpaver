@@ -15,13 +15,19 @@ import math
 from dataclasses import dataclass, replace
 from typing import List, Literal, Optional, Sequence, Tuple, Union
 
-import matplotlib as mpl
-import matplotlib.path
 import numpy as np
 import shapely
 from scipy.sparse import coo_array, csc_array
 
 from quickpaver._types import Int, NDArrayBool, NDArrayFloat, NDArrayInt
+
+
+def _mpl_path():
+    """``matplotlib.path.Path``, imported on first use (keeps
+    ``import quickpaver`` fast)."""
+    from matplotlib.path import Path
+
+    return Path
 
 
 def rlg_idx_to_nn(
@@ -1554,7 +1560,7 @@ def create_selections_array_2d(
     mask_sum: Optional[NDArrayBool] = None
     for _polygon, cell_id in zip(polygons, _sel_ids):
         # Select the mesh that belongs to the polygon
-        path = mpl.path.Path(_polygon)
+        path = _mpl_path()(_polygon)
         mask = path.contains_points(
             grid.center_coords[:2, :, :, 0].reshape(2, -1, order="F").T
         )
@@ -1576,7 +1582,7 @@ def _get_mask(
     polygon, selection: NDArrayInt, center_coords_2d: NDArrayFloat, nx: int, ny: int
 ) -> NDArrayBool:
     # Select the mesh that belongs to the polygon
-    path = mpl.path.Path(polygon)
+    path = _mpl_path()(polygon)
     mask = np.reshape(
         path.contains_points(center_coords_2d),
         (nx, ny),
@@ -1706,7 +1712,7 @@ def get_polygon_selection_with_dilation_2d(
     # not depend on the selection state, so it is invariant across dilation
     # iterations).
     containment_masks = [
-        mpl.path.Path(vertices)
+        _mpl_path()(vertices)
         .contains_points(_grid_coords_2d)
         .reshape(grid.nx, grid.ny, order="F")
         for vertices in polygons
@@ -1816,7 +1822,7 @@ def get_polygon_selection_with_dilation_3d(
         for i in range(len(polygons))
     ]
     containment_masks = [
-        mpl.path.Path(vertices)
+        _mpl_path()(vertices)
         .contains_points(_grid_coords_2d)
         .reshape(grid.nx, grid.ny, order="F")
         for vertices in polygons
@@ -2529,12 +2535,9 @@ class TriMesh:
         Triangle order matches ``tri_verts`` row order, so the polygon at
         index ``t`` corresponds to triangle id ``t``.
         """
-        return shapely.MultiPolygon(
-            [
-                shapely.Polygon(self.verts_xy[self.tri_verts[t]])
-                for t in range(self.n_tri)
-            ]
-        )
+        # One vectorized GEOS call instead of a Python loop building
+        # ``n_tri`` Polygon objects one by one (~20x faster).
+        return shapely.MultiPolygon(shapely.polygons(self.verts_xy[self.tri_verts]))
 
     def transform(
         self,

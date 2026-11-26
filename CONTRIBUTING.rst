@@ -101,11 +101,15 @@ Ready to contribute? Here’s how to set up `quickpaver` for local development.
     $ git clone git@github.com:your_username/quickpaver.git
     $ cd quickpaver
 
-3. Create and activate a virtual environment, then install dependencies::
+3. Install a `Rust toolchain <https://rustup.rs>`_ and `uv <https://docs.astral.sh/uv/>`_,
+   then create the development environment (this compiles the Rust extension in
+   release mode, installs it in editable mode and installs the dev tools)::
 
-    $ python -m venv venv
-    $ source venv/bin/activate  # On Windows: venv\Scripts\activate
-    $ pip install -e .[all]
+    $ uv sync
+    $ uv run pre-commit install
+
+   ``uv sync`` / ``uv run`` rebuild the extension whenever the Rust code changes. The
+   version lives in ``Cargo.toml`` only (it is read by maturin).
 
 4. Create a new branch for your work::
 
@@ -113,18 +117,21 @@ Ready to contribute? Here’s how to set up `quickpaver` for local development.
 
 5. Make your changes locally.
 
-6. Run linting, tests, and coverage checks against all supported python versions::
+6. Run linting (ruff, ty, codespell, rustfmt, clippy) and the Python and Rust tests::
 
-    $ pre-commit run --all-files
-    $ make coverage
-    $ tox
+    $ make lint
+    $ make test
+    $ make test-cov
+
+   ``make build`` builds a release wheel for the current platform; the wheels of every
+   platform and Python version (3.10 to 3.15, free-threaded included) are built and
+   tested by the release workflow when a ``vX.Y.Z`` tag is pushed.
 
    If you worked on documentation, you can build it locally:
 
    .. code-block:: shell
 
-      $ cd docs
-      $ make html
+      $ make docs
 
    The built documentation will be located in ``docs/build/html``.
 

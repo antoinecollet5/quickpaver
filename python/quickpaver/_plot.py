@@ -1,11 +1,19 @@
-"""Efficient rendering of an edge list with matplotlib."""
+"""Efficient rendering of an edge list with matplotlib.
+
+matplotlib is an optional dependency: it is imported only when a drawing
+function is called, so ``import quickpaver`` works without it.
+"""
+
+from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
-from matplotlib.axes import Axes
-from matplotlib.collections import LineCollection
-from matplotlib.lines import Line2D
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.collections import LineCollection
 
 NDArrayFloat = np.typing.NDArray[np.floating]
 
@@ -144,6 +152,8 @@ def _draw_edges(
 
     """
     segments = _edges_to_segments(edges, pos)
+    from matplotlib.collections import LineCollection
+
     collection = LineCollection(segments, **kwargs)  # ty:ignore[invalid-argument-type]
     ax.add_collection(collection)
 
@@ -203,6 +213,8 @@ def draw_adjacency(
     collection = _draw_edges(ax, edges, pos, **kwargs)
 
     if node_kwargs is not None:
+        from matplotlib.lines import Line2D
+
         line = Line2D(points[:, 0], points[:, 1], linestyle="None", **node_kwargs)  # ty:ignore[invalid-argument-type]
         ax.add_line(line)
 

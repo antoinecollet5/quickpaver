@@ -9,8 +9,10 @@ from typing import Any
 
 import numpy as np
 import pytest
-import quickpaver
 import shapely
+from scipy.sparse import csc_array
+
+import quickpaver
 from quickpaver._grid import (
     _as_full_slice_tuple,
     _get_centroid_voxel_coords,
@@ -27,7 +29,6 @@ from quickpaver._grid import (
     span_to_node_numbers_2d,
     span_to_node_numbers_3d,
 )
-from scipy.sparse import csc_array
 
 # ---------------------------------------------------------------------------
 # Fake PyVista objects and fixtures

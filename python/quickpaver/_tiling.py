@@ -225,6 +225,24 @@ def _pairs_to_adj(
         return {}
     if len(src) == 0:
         return {i: [] for i in range(n_nodes)}
+    indptr, indices = _pairs_to_csr(src, dst, n_nodes)
+    flat = indices.tolist()
+    ends = indptr[1:].tolist()
+    adj = {}
+    start = 0
+    for node, end in enumerate(ends):
+        adj[node] = flat[start:end]
+        start = end
+    return adj
+
+
+def _pairs_to_csr(
+    src: NDArrayInt, dst: NDArrayInt, n_nodes: int
+) -> Tuple[NDArrayInt, NDArrayInt]:
+    """Group ``(src, dst)`` pairs into CSR arrays ``(indptr, indices)`` with
+    sorted, duplicate-free neighbour lists (see :func:`_pairs_to_adj`)."""
+    if len(src) == 0:
+        return np.zeros(n_nodes + 1, dtype=np.intp), np.empty(0, dtype=np.intp)
 
     # Encode each (src, dst) pair as a single integer and sort, which orders
     # the edges by source and, within a source, by destination.  A plain sort
@@ -238,17 +256,9 @@ def _pairs_to_adj(
     code.sort()
     code = code[np.concatenate(([True], np.diff(code) != 0))]
     src_sorted, dst_sorted = np.divmod(code, stride)
-
-    # Slice the sorted destinations into one contiguous run per source.
-    counts = np.bincount(src_sorted, minlength=n_nodes)
-    flat = dst_sorted.tolist()
-    ends = np.cumsum(counts).tolist()
-    adj = {}
-    start = 0
-    for node, end in enumerate(ends):
-        adj[node] = flat[start:end]
-        start = end
-    return adj
+    indptr = np.zeros(n_nodes + 1, dtype=np.intp)
+    np.cumsum(np.bincount(src_sorted, minlength=n_nodes), out=indptr[1:])
+    return indptr, dst_sorted.astype(np.intp, copy=False)
 
 
 def _lattice_centres(
@@ -512,8 +522,8 @@ def _tiles_from_centres(
 
     Returns
     -------
-    kept_polygons : NDArrayFloat of shapely.Polygon, shape (n_kept,)
-        Tiles intersecting the surface, in lattice order.
+    kept_rings : NDArrayFloat, shape (n_kept, n_vertices, 2)
+        Open rings of the tiles intersecting the surface, in lattice order.
     mask : NDArray of bool, shape (nj * ni,)
         Keep mask over the full lattice, suitable for the structured
         adjacency builders.
@@ -538,22 +548,23 @@ def _tiles_from_centres(
     rings = centres_flat[:, None, :] + verts[None, :, :]
 
     mask = np.zeros(candidates.size, dtype=bool)
-    if isinstance(surface_to_cover, Disk):
-        # Analytic membership: build only the tiles that are kept.
-        kept = _disk_mask_from_rings(rings, surface_to_cover)
-        mask[candidates] = kept
-        return shapely.polygons(rings[kept]), mask
-
-    polygons = shapely.polygons(rings)
-
+    kept = _keep_rings(rings, surface_to_cover)
     # Scatter the predicate result back onto the full lattice.
-    mask[candidates] = intersects_mask(polygons, surface_to_cover)
-    return polygons[mask[candidates]], mask
+    mask[candidates] = kept
+    return rings[kept], mask
 
 
 def _vectorized_grid_adjacency(
     n_rows: int, n_cols: int, mask: NDArrayBool, offsets: NDArrayFloat
 ) -> Dict[int, List[int]]:
+    """Adjacency dictionary of a masked structured grid (see
+    :func:`_vectorized_grid_pairs`)."""
+    return _pairs_to_adj(*_vectorized_grid_pairs(n_rows, n_cols, mask, offsets))
+
+
+def _vectorized_grid_pairs(
+    n_rows: int, n_cols: int, mask: NDArrayBool, offsets: NDArrayFloat
+) -> Tuple[NDArrayInt, NDArrayInt, int]:
     """Vectorized adjacency builder for a uniform offset list.
 
     Every offset contributes a batch of ``(source, destination)`` pairs.
@@ -571,7 +582,10 @@ def _vectorized_grid_adjacency(
 
     Returns
     -------
-    Dict[int, List[int]]
+    src, dst : NDArrayInt
+        Compact (kept-cell) indices of every directed neighbour pair.
+    n : int
+        Number of kept cells.
     """
     mask_flat = mask.ravel()
     mask2d = mask_flat.reshape(n_rows, n_cols)
@@ -594,9 +608,7 @@ def _vectorized_grid_adjacency(
         src_parts.append(grid_to_compact[src[valid_dst]])
         dst_parts.append(grid_to_compact[dst[valid_dst]])
 
-    return _pairs_to_adj(
-        np.concatenate(src_parts), np.concatenate(dst_parts), len(valid)
-    )
+    return np.concatenate(src_parts), np.concatenate(dst_parts), len(valid)
 
 
 def rectangular_grid_adjacency_masked(
@@ -632,11 +644,47 @@ def rectangular_grid_adjacency_masked(
         Dictionary mapping each valid polygon's compact index to a list of neighbor
         indices.
     """
+    return _pairs_to_adj(*_rectangular_grid_pairs(n_rows, n_cols, mask))
+
+
+def _rectangular_grid_pairs(
+    n_rows: int, n_cols: int, mask: NDArrayBool
+) -> Tuple[NDArrayInt, NDArrayInt, int]:
+    """
+    Build adjacency dictionary for a rectangular grid of polygons with a mask.
+
+    Note
+    ----
+    Only polygons where mask == True are included. Indices are compact:
+    0 ... n_valid-1 for valid polygons.
+
+    Neighbors are 4-connected (vertical and horizontal only): two rectangles
+    are adjacent only when they share a full edge. Diagonal cells, which
+    touch at a single corner, are not included since a shared vertex alone
+    does not make two tiles adjacent.
+
+    Neighbour lists are sorted in ascending order and duplicate-free.
+
+    Parameters
+    ----------
+    n_rows : int
+        Number of rows in the grid.
+    n_cols : int
+        Number of columns in the grid.
+    mask : NDArrayBool of shape (rows*cols,)
+        Boolean array indicating which polygons exist (True).
+
+    Returns
+    -------
+    adj : Dict[int, list[int]]
+        Dictionary mapping each valid polygon's compact index to a list of neighbor
+        indices.
+    """
     offsets = np.array(
         [(-1, 0), (1, 0), (0, -1), (0, 1)],
         dtype=int,
     )
-    return _vectorized_grid_adjacency(n_rows, n_cols, mask, offsets)
+    return _vectorized_grid_pairs(n_rows, n_cols, mask, offsets)
 
 
 def gen_rectangular_tiling(
@@ -673,6 +721,20 @@ def gen_rectangular_tiling(
               adjacent hexagon indices.
 
     """
+    return _tiling_from_arrays(
+        *_rectangular_tiling_arrays(
+            surface_to_cover, edge_length, anisotropy_ratio, alignment_point
+        )
+    )
+
+
+def _rectangular_tiling_arrays(
+    surface_to_cover: Surface,
+    edge_length: float,
+    anisotropy_ratio: float = 1.0,
+    alignment_point: Optional[ArrayLike] = None,
+) -> Tuple[NDArrayFloat, NDArrayInt, NDArrayInt, int]:
+    """Array core of :func:`gen_rectangular_tiling`: kept rings, adjacency pairs."""
     _validate_inputs(edge_length, anisotropy_ratio)
 
     v_step = edge_length * anisotropy_ratio  #  Vertical step (height of a hexagon)
@@ -690,16 +752,8 @@ def gen_rectangular_tiling(
 
     # Build the tiles intersecting the surface, with the keep mask over the
     # full lattice.
-    kept_polygons, mask = _tiles_from_centres(centers, verts, surface_to_cover)
-
-    # Adjacency of kept polygons
-    adjacency_dict = rectangular_grid_adjacency_masked(
-        centers.shape[1], centers.shape[2], mask
-    )
-    # shapely.multipolygons builds the collection in C; the MultiPolygon
-    # constructor walks the sequence and runs a Python-level emptiness check
-    # on every member.
-    return shapely.multipolygons(kept_polygons), adjacency_dict
+    rings, mask = _tiles_from_centres(centers, verts, surface_to_cover)
+    return (rings, *_rectangular_grid_pairs(centers.shape[1], centers.shape[2], mask))
 
 
 def hexagonal_grid_adjacency_masked(
@@ -735,9 +789,45 @@ def hexagonal_grid_adjacency_masked(
         Dictionary mapping each valid polygon's compact index to a list of neighbor
         indices.
     """
+    return _pairs_to_adj(*_hexagonal_grid_pairs(nv, nh, mask))
+
+
+def _hexagonal_grid_pairs(
+    nv: int,
+    nh: int,
+    mask: NDArrayBool,
+) -> Tuple[NDArrayInt, NDArrayInt, int]:
+    """
+    Build adjacency dictionary for a hexagonal grid of polygons with a mask.
+
+    Two column layouts produce a hexagonal tiling and they do not share the
+    same index topology:
+
+    Note
+    ----
+    Only polygons where mask == True are included. Indices are compact:
+    0 ... n_valid-1 for valid polygons.
+
+    Neighbour lists are sorted in ascending order and duplicate-free.
+
+    Parameters
+    ----------
+    nv : int
+        Number of rows in the grid.
+    nh : int
+        Number of columns in the grid.
+    mask : NDArrayBool of shape (nv*nh,)
+        Boolean array indicating which polygons exist (True).
+
+    Returns
+    -------
+    adj : Dict[int, list[int]]
+        Dictionary mapping each valid polygon's compact index to a list of neighbor
+        indices.
+    """
     # Sheared lattice: the six neighbour offsets are the same everywhere.
     offsets = np.array([(0, -1), (0, 1), (-1, 0), (1, 0), (1, 1), (-1, -1)], dtype=int)
-    return _vectorized_grid_adjacency(nv, nh, mask, offsets)
+    return _vectorized_grid_pairs(nv, nh, mask, offsets)
 
 
 def gen_hexagonal_tiling(
@@ -774,6 +864,20 @@ def gen_hexagonal_tiling(
               of adjacent hexagon indices.
 
     """
+    return _tiling_from_arrays(
+        *_hexagonal_tiling_arrays(
+            surface_to_cover, edge_length, anisotropy_ratio, alignment_point
+        )
+    )
+
+
+def _hexagonal_tiling_arrays(
+    surface_to_cover: Surface,
+    edge_length: float,
+    anisotropy_ratio: float = 1.0,
+    alignment_point: Optional[ArrayLike] = None,
+) -> Tuple[NDArrayFloat, NDArrayInt, NDArrayInt, int]:
+    """Array core of :func:`gen_hexagonal_tiling`: kept open rings, adjacency pairs."""
     _validate_inputs(edge_length, anisotropy_ratio)
 
     # Calculate the vertical and horizontal step distances between centers of hexagons
@@ -796,17 +900,8 @@ def gen_hexagonal_tiling(
 
     # Build the tiles intersecting the surface, with the keep mask over the
     # full lattice.
-    kept_polygons, mask = _tiles_from_centres(centers, verts, surface_to_cover)
-
-    # Adjacency of kept polygons
-    adjacency_dict = hexagonal_grid_adjacency_masked(
-        centers.shape[1],
-        centers.shape[2],
-        mask,
-    )
-
-    # Built in C rather than through the per-member MultiPolygon constructor.
-    return shapely.multipolygons(kept_polygons), adjacency_dict
+    rings, mask = _tiles_from_centres(centers, verts, surface_to_cover)
+    return (rings, *_hexagonal_grid_pairs(centers.shape[1], centers.shape[2], mask))
 
 
 def extract_tiling_centers(
@@ -827,7 +922,7 @@ def extract_tiling_centers(
           polygons.
     """
     if isinstance(polygons, shapely.MultiPolygon):
-        geom_array = shapely.get_parts(polygons)
+        geom_array = np.array(polygons.geoms)
     else:
         geom_array = np.asarray(list(polygons))
     centroids = shapely.centroid(geom_array)
@@ -1002,7 +1097,7 @@ def extract_tiling_vertices(
         Polygon id → deduplicated vertex ids in ring order.
     """
     if isinstance(polygons, shapely.MultiPolygon):
-        geom_array = shapely.get_parts(polygons)
+        geom_array = np.array(polygons.geoms)
     else:
         geom_array = np.asarray(list(polygons))
 
@@ -1073,7 +1168,7 @@ def extract_tiling_edge_centers(
         rectangle, entries ``(0, 2)`` and ``(1, 3)`` are the opposite pairs.
     """
     if isinstance(polygons, shapely.MultiPolygon):
-        geom_array = shapely.get_parts(polygons)
+        geom_array = np.array(polygons.geoms)
     else:
         geom_array = np.asarray(list(polygons))
 
@@ -1203,6 +1298,39 @@ def triangular_grid_adjacency_masked(
     Dict[int, List[int]]
         Adjacency dictionary with compact (0-based) indices.
     """
+    return _pairs_to_adj(*_triangular_grid_pairs(nj, ni, mask))
+
+
+def _triangular_grid_pairs(
+    nj: int, ni: int, mask: NDArrayBool
+) -> Tuple[NDArrayInt, NDArrayInt, int]:
+    """
+    Build adjacency dictionary for a triangular grid produced by
+    :func:`gen_triangular_tiling`.
+
+    Each lattice cell ``(j, i)`` produces two triangles stored at flat
+    indices ``(j * ni + i) * 2 + k`` where *k* is 0 (lower-right) or
+    1 (upper-left).  Two triangles are neighbours only when they share a
+    full edge (i.e. two vertices), never when they merely touch at a
+    single lattice-node vertex.  Every triangle has exactly 3 edges, so
+    it has at most 3 edge-sharing neighbours.
+
+    Neighbour lists are sorted in ascending order and duplicate-free.
+
+    Parameters
+    ----------
+    nj : int
+        Number of lattice rows.
+    ni : int
+        Number of lattice columns.
+    mask : NDArrayBool of shape (nj * ni * 2,)
+        Boolean array indicating which triangles exist.
+
+    Returns
+    -------
+    Dict[int, List[int]]
+        Adjacency dictionary with compact (0-based) indices.
+    """
     mask_flat = mask.ravel()
     n_total = nj * ni * 2
     valid = np.flatnonzero(mask_flat)
@@ -1265,9 +1393,63 @@ def triangular_grid_adjacency_masked(
 
     # Group every (source, destination) pair in a single pass; the encoding
     # used there already yields sorted, duplicate-free neighbour lists.
-    return _pairs_to_adj(
-        np.concatenate(src_parts), np.concatenate(dst_parts), len(valid)
+    return np.concatenate(src_parts), np.concatenate(dst_parts), len(valid)
+
+
+def _tiling_from_arrays(
+    rings: NDArrayFloat, src: NDArrayInt, dst: NDArrayInt, n: int
+) -> Tuple[shapely.MultiPolygon, Dict[int, List[int]]]:
+    """Shapely tiling and adjacency dictionary from the array core."""
+    return shapely.multipolygons(shapely.polygons(rings)), _pairs_to_adj(src, dst, n)
+
+
+def _classify_boxes(
+    lo: NDArrayFloat,
+    hi: NDArrayFloat,
+    surface: Union[shapely.Polygon, shapely.MultiPolygon],
+) -> np.typing.NDArray[np.int8]:
+    """Rust inside (1) / outside (0) / ambiguous (-1) classification of boxes
+    ``[lo, hi]`` against a polygonal surface (ambiguous boxes need GEOS)."""
+    from quickpaver._transfer_matrix import _ragged_polygons, _rs
+
+    parts = shapely.get_parts(surface)
+    parts = parts[shapely.get_type_id(parts) == shapely.GeometryType.POLYGON]
+    ext = np.max(hi - lo, axis=1) if len(lo) else np.empty(0)
+    ext = ext[np.isfinite(ext) & (ext > 0)]
+    if len(ext):
+        cell = float(np.median(ext))
+    else:
+        x0, y0, x1, y1 = surface.bounds
+        cell = max(x1 - x0, y1 - y0, 1e-12) / 1000.0
+    rg = _ragged_polygons(parts)
+    c = np.ascontiguousarray
+    return _rs.classify_boxes(
+        c(lo[:, 0], dtype=float),
+        c(lo[:, 1], dtype=float),
+        c(hi[:, 0], dtype=float),
+        c(hi[:, 1], dtype=float),
+        rg.x,
+        rg.y,
+        rg.ring_off,
+        rg.poly_ring,
+        cell,
     )
+
+
+def _keep_rings(rings: NDArrayFloat, surface: Surface) -> NDArrayBool:
+    """Keep mask of tiles ``rings`` (shape ``(n, k, 2)``) intersecting
+    *surface*. Clearly inside / outside tiles are decided in Rust; only the
+    tiles near the boundary are built as polygons and tested with GEOS."""
+    if isinstance(surface, Disk):
+        return np.asarray(_disk_mask_from_rings(rings, surface), dtype=bool)
+    if len(rings) == 0:
+        return np.zeros(0, dtype=bool)
+    cls = _classify_boxes(rings.min(axis=1), rings.max(axis=1), surface)
+    keep = cls == 1
+    amb = np.flatnonzero(cls < 0)
+    if len(amb):
+        keep[amb] = _intersects_geos(shapely.polygons(rings[amb]), surface)
+    return keep
 
 
 def intersects_mask(
@@ -1311,8 +1493,21 @@ def intersects_mask(
         rings = coords.reshape(len(polygons), n_vertices + 1, 2)[:, :-1, :]
         return _disk_mask_from_rings(rings, surface)
 
+    # Tiles clearly inside / outside the surface are classified in Rust;
+    # GEOS evaluates the predicate only near the boundary.
+    bounds = shapely.bounds(polygons)
+    cls = _classify_boxes(bounds[:, :2], bounds[:, 2:], surface)
+    mask = cls == 1
+    amb = np.flatnonzero(cls < 0)
+    if len(amb):
+        mask[amb] = _intersects_geos(polygons[amb], surface)
+    return mask
+
+
+def _intersects_geos(polygons: NDArrayFloat, surface: Surface) -> NDArrayBool:
+    """GEOS ``intersects`` of every polygon with *surface* (prepared)."""
     if isinstance(surface, shapely.MultiPolygon) and len(surface.geoms) > 8:
-        parts = np.asarray(surface.geoms)
+        parts = shapely.get_parts(surface)
         shapely.prepare(parts)
         tree = shapely.STRtree(polygons)
         hit = tree.query(parts, predicate="intersects")[1]
@@ -1394,6 +1589,20 @@ def gen_triangular_tiling(
     tilings because all shared edges and vertices are generated from the same
     coordinates.
     """
+    return _tiling_from_arrays(
+        *_triangular_tiling_arrays(
+            surface_to_cover, edge_length, anisotropy_ratio, alignment_point
+        )
+    )
+
+
+def _triangular_tiling_arrays(
+    surface_to_cover: Surface,
+    edge_length: float,
+    anisotropy_ratio: float = 1.0,
+    alignment_point: Optional[ArrayLike] = None,
+) -> Tuple[NDArrayFloat, NDArrayInt, NDArrayInt, int]:
+    """Array core of :func:`gen_triangular_tiling`: kept open rings, adjacency pairs."""
     _validate_inputs(edge_length, anisotropy_ratio)
 
     # Store the horizontal edge length using a short geometric name.
@@ -1472,27 +1681,14 @@ def gen_triangular_tiling(
         & (lo[:, 1] <= y_max)
     )
 
+    # Keep the triangles intersecting the surface (geometry is only built
+    # for the few ambiguous ones, see _keep_rings) and scatter the result
+    # back onto the full lattice for the adjacency builder.
     mask = np.zeros(candidates.size, dtype=bool)
-    if isinstance(surface_to_cover, Disk):
-        # Analytic membership: build only the triangles that are kept.
-        kept = _disk_mask_from_rings(tri_coords[candidates], surface_to_cover)
-        mask[candidates] = kept
-        kept_polygons = shapely.polygons(tri_coords[candidates][kept])
-    else:
-        # Convert the candidate triangle coordinate arrays into Shapely
-        # polygons, then keep those intersecting the requested surface and
-        # scatter the result back onto the full lattice for the adjacency
-        # builder.
-        polygons = shapely.polygons(tri_coords[candidates])
-        mask[candidates] = intersects_mask(polygons, surface_to_cover)
-        kept_polygons = polygons[mask[candidates]]
-
-    # Compute adjacency from the structured grid topology.
-    adjacency_dict = triangular_grid_adjacency_masked(nj, ni, mask)
-
-    # Return the final tiling and its adjacency dictionary.
-    # Built in C rather than through the per-member MultiPolygon constructor.
-    return shapely.multipolygons(kept_polygons), adjacency_dict
+    cand_coords = tri_coords[candidates]
+    kept = _keep_rings(cand_coords, surface_to_cover)
+    mask[candidates] = kept
+    return (cand_coords[kept], *_triangular_grid_pairs(nj, ni, mask))
 
 
 def gen_polygonal_tiling(
@@ -1556,6 +1752,70 @@ def gen_polygonal_tiling(
     generates the axis-aligned tiling, then re-rotates the result by
     ``+rot_deg`` so that the output tiles are in world-space coordinates.
     """
+    return _tiling_from_arrays(
+        *_polygonal_tiling_arrays(
+            surface_to_cover,
+            poly_type,
+            edge_length,
+            anisotropy_ratio,
+            rot_deg,
+            alignment_point,
+        )
+    )
+
+
+def gen_polygonal_tiling_arrays(
+    surface_to_cover: Surface,
+    poly_type: PolygonType,
+    edge_length: float,
+    anisotropy_ratio: float = 1.0,
+    rot_deg: float = 0.0,
+    alignment_point: Optional[ArrayLike] = None,
+) -> Tuple[NDArrayFloat, NDArrayInt, NDArrayInt]:
+    """
+    Same tiling as :func:`gen_polygonal_tiling`, returned as plain arrays
+    (no Shapely geometry, no Python dictionary).
+
+    This is the fast path for very large tilings consumed numerically;
+    :func:`gen_polygonal_tiling` is built on top of it, so for the same
+    arguments ``shapely.polygons(vertices)`` are exactly its polygons and
+    the CSR adjacency holds exactly its neighbour lists.
+
+    Parameters
+    ----------
+    surface_to_cover, poly_type, edge_length, anisotropy_ratio, rot_deg, alignment_point
+        See :func:`gen_polygonal_tiling`.
+
+    Returns
+    -------
+    vertices : NDArrayFloat, shape (n_tiles, n_vertices, 2)
+        Open ring of every tile (3, 4 or 6 vertices), in tiling order.
+    adjacency_indptr : NDArrayInt, shape (n_tiles + 1,)
+    adjacency_indices : NDArrayInt, shape (n_edges,)
+        CSR adjacency: the neighbours of tile ``i`` are
+        ``adjacency_indices[adjacency_indptr[i]:adjacency_indptr[i + 1]]``
+        (sorted, as in the dictionary of :func:`gen_polygonal_tiling`).
+    """
+    rings, src, dst, n = _polygonal_tiling_arrays(
+        surface_to_cover,
+        poly_type,
+        edge_length,
+        anisotropy_ratio,
+        rot_deg,
+        alignment_point,
+    )
+    return (rings, *_pairs_to_csr(src, dst, n))
+
+
+def _polygonal_tiling_arrays(
+    surface_to_cover: Surface,
+    poly_type: PolygonType,
+    edge_length: float,
+    anisotropy_ratio: float = 1.0,
+    rot_deg: float = 0.0,
+    alignment_point: Optional[ArrayLike] = None,
+) -> Tuple[NDArrayFloat, NDArrayInt, NDArrayInt, int]:
+    """Array core of :func:`gen_polygonal_tiling`: rotated rings, adjacency."""
     origin = surface_to_cover.centroid
     if isinstance(surface_to_cover, Disk):
         # A disk is invariant under rotation about its own centre, which is
@@ -1581,21 +1841,21 @@ def gen_polygonal_tiling(
         ).ravel()
 
     if poly_type == PolygonType.HEXAGON:
-        _grid, _adj = gen_hexagonal_tiling(
+        rings, src, dst, n = _hexagonal_tiling_arrays(
             rot_surface_to_cover,
             edge_length=edge_length,
             anisotropy_ratio=anisotropy_ratio,
             alignment_point=rot_alignment_point,
         )
     elif poly_type == PolygonType.TRIANGLE:
-        _grid, _adj = gen_triangular_tiling(
+        rings, src, dst, n = _triangular_tiling_arrays(
             rot_surface_to_cover,
             edge_length=edge_length,
             anisotropy_ratio=anisotropy_ratio,
             alignment_point=rot_alignment_point,
         )
     elif poly_type == PolygonType.RECTANGLE:
-        _grid, _adj = gen_rectangular_tiling(
+        rings, src, dst, n = _rectangular_tiling_arrays(
             rot_surface_to_cover,
             edge_length=edge_length,
             anisotropy_ratio=anisotropy_ratio,
@@ -1605,17 +1865,15 @@ def gen_polygonal_tiling(
         raise ValueError(PolygonType(poly_type))
 
     if rot_deg == 0.0:
-        return _grid, _adj
+        return rings, src, dst, n
 
-    # Batch-rotate all polygon coordinates via shapely.get_coordinates /
-    # shapely.set_coordinates instead of per-polygon Python loops.
+    # Rotate the kept tiles back in one vectorized pass, before any geometry
+    # is built (same arithmetic as rotating the finished tiling).
     origin_xy = np.array(origin.coords[0])
     theta = np.radians(rot_deg)
     c, s = np.cos(theta), np.sin(theta)
     R = np.array([[c, -s], [s, c]])
 
-    geom_array = np.array(list(_grid.geoms))
-    coords = shapely.get_coordinates(geom_array)
-    rotated_coords = (coords - origin_xy) @ R.T + origin_xy
-    rotated_geoms = shapely.set_coordinates(geom_array.copy(), rotated_coords)
-    return shapely.multipolygons(rotated_geoms), _adj
+    shape = rings.shape
+    rotated = (rings.reshape(-1, 2) - origin_xy) @ R.T + origin_xy
+    return rotated.reshape(shape), src, dst, n

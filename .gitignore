@@ -128,3 +128,12 @@ _autosummary/
 **/HM_RESULTS/
 examples/articles/gd_gan/wgan_both_2202_b.pt
 examples/articles/gd_gan/iswgan_conditioner_b.pt
+
+# Rust
+target/
+# compiled extension of the dev install
+python/quickpaver/_quickpaver*.so
+python/quickpaver/_quickpaver*.pyd
+.venv*/
+
+devs/*

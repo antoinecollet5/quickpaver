@@ -4,17 +4,17 @@ Tests for :func:`quickpaver._transfer_matrix._compute_transfer_matrix_mixed`
 (RectilinearGrid <-> arbitrary MultiPolygon), reached through the public
 :func:`quickpaver.compute_transfer_matrix` /
 :func:`quickpaver.compute_transfer_matrix_with_intersections` entry points,
-plus a couple of direct white-box calls for branches the public API cannot
-reach (the ``polygon_grid_is_convex`` shortcut, and the clip-buffer-overflow
-``ValueError``).
+plus a direct white-box call for the ``polygon_grid_is_convex`` shortcut,
+which the public API cannot reach.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-import quickpaver
 import shapely
+
+import quickpaver
 from quickpaver import RectilinearGrid
 from quickpaver._tm_test_utils import (
     l_shape_polygon,
@@ -22,10 +22,7 @@ from quickpaver._tm_test_utils import (
     regular_ngon,
     square_with_hole,
 )
-from quickpaver._transfer_matrix import (
-    _clip_buffer_width,
-    _compute_transfer_matrix_mixed,
-)
+from quickpaver._transfer_matrix import _compute_transfer_matrix_mixed
 
 
 class TestRectSourcePolygonTarget:
@@ -179,30 +176,20 @@ class TestPolygonSourceRectTarget:
         assert W.nnz == 0
 
 
-class TestClipBufferOverflow:
-    """The polygon-vertex padded clip buffer has a hard ceiling
-    (``_MAX_CLIP_VERTS``); polygons with too many vertices must raise
-    rather than silently truncate."""
+class TestManySidedPolygons:
+    """Polygons of any vertex count are clipped exactly (no fixed-size
+    buffer limit, which made v0.6.0 raise for more than 28 vertices)."""
 
-    def test_direct_helper_raises_when_too_wide(self) -> None:
-        with pytest.raises(ValueError, match="_MAX_CLIP_VERTS"):
-            _clip_buffer_width(max_verts=30, n_clip_edges=4)
-
-    def test_direct_helper_ok_at_the_boundary(self) -> None:
-        # 28 + 4 == 32 == _MAX_CLIP_VERTS -> must NOT raise.
-        assert _clip_buffer_width(max_verts=28, n_clip_edges=4) == 32
-
-    def test_many_sided_convex_polygon_triggers_overflow(self) -> None:
-        """A 40-gon (convex, holeless) anywhere in the polygon grid inflates
-        ``_PolygonVertexData.max_verts`` for the whole batch, so even a
-        disjoint one blows the shared clip buffer once any convex polygon
-        in the same call is actually clipped."""
+    def test_many_sided_convex_polygon(self) -> None:
+        """A 40-gon (e.g. a disk-clipped tile) next to small polygons."""
         rect = RectilinearGrid(cx=0.0, cy=0.0, dx=1.0, dy=1.0, nx=3, ny=3, theta=0.0)
-        huge = regular_ngon(1000.0, 1000.0, 5.0, 40)  # far away, disjoint
+        huge = regular_ngon(0.2, -0.1, 1.2, 40)  # overlaps several cells
+        far = regular_ngon(1000.0, 1000.0, 5.0, 40)  # far away, disjoint
         small = regular_ngon(0.0, 0.0, 0.4, 6)  # overlaps the grid
-        target = shapely.MultiPolygon([huge, small])
-        with pytest.raises(ValueError, match="_MAX_CLIP_VERTS"):
-            quickpaver.compute_transfer_matrix(rect, target)
+        target = shapely.MultiPolygon([huge, far, small])
+        mat = quickpaver.compute_transfer_matrix(rect, target)
+        ref = quickpaver.compute_transfer_matrix(rect.to_shapely(), target)
+        np.testing.assert_allclose(mat.toarray(), ref.toarray(), atol=1e-12)
 
 
 class TestPolygonGridIsConvexShortcut:

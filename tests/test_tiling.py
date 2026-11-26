@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, cast
 import numpy as np
 import pytest
 import shapely
+
 from quickpaver._tiling import (
     DEFAULT_ALIGNMENT_POINT,
     SQRT3,
