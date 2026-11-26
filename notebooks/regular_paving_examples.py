@@ -558,5 +558,12 @@ def _(plot_helper, quickpaver, shapely):
     return
 
 
+@app.cell(hide_code=True)
+def _():
+    import marimo as mo
+
+    return (mo,)
+
+
 if __name__ == "__main__":
     app.run()

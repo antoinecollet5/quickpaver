@@ -1125,10 +1125,10 @@ class RectilinearGrid(Grid):
 
             - ``"image"`` returns a compact :class:`pyvista.ImageData`.
             - ``"rectilinear"`` returns a :class:`pyvista.RectilinearGrid`.
-            This is only valid for non-rotated grids.
+              This is only valid for non-rotated grids.
             - ``"structured"`` returns a :class:`pyvista.StructuredGrid`.
-            This representation explicitly stores all grid points and supports
-            rotations through PyVista geometry transforms.
+              This representation explicitly stores all grid points and supports
+              rotations through PyVista geometry transforms.
 
             By default ``"image"``.
         apply_rotation : bool, optional

@@ -137,3 +137,8 @@ python/quickpaver/_quickpaver*.pyd
 .venv*/
 
 devs/*
+
+# marimo notebooks exported while building the docs
+docs/sources/_static/marimo/
+# marimo session caches
+__marimo__/

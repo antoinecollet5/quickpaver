@@ -44,6 +44,10 @@ Fixes:
 
 Packaging:
 
+* DOCS: the example notebooks are marimo notebooks only (the Jupyter copy is removed).
+  They are executed and exported to HTML with ``marimo export html`` while building the
+  documentation, which no longer needs nbsphinx, Jupyter or pandoc. Fixed the notebooks
+  (``mo`` was used but never imported).
 * STYLE: upgrade to ``ruff==0.17.6`` and ``ty==0.0.111``.
 * BUILD: maturin mixed Rust / Python project (``python/`` + ``src/``); the version lives in
   ``Cargo.toml``. Wheels for CPython 3.10 to 3.15, including the free-threaded 3.14t and
@@ -113,7 +117,7 @@ Packaging:
 ------------------
 
 * DOCS: improved ``gen_polygon`` docstring.
-* FIX: when no ``alignment_point``is provided, the grid positioning is consistent with
+* FIX: when no ``alignment_point`` is provided, the grid positioning is consistent with
   v0.2.x for retro-compatibility.
 * TEST: updated github actions in CI.
 

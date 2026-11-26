@@ -35,6 +35,8 @@ def skip(app, what, name, obj, skip, options):
 
 def setup(app):
     app.connect("autodoc-skip-member", skip)
+    # defined at the end of this file (marimo notebooks section)
+    app.connect("builder-inited", export_marimo_notebooks)
 
 
 # -- General configuration ------------------------------------------------
@@ -59,13 +61,6 @@ extensions = [
     "sphinx.ext.intersphinx",  # Link to other projects’ documentation
     "sphinx.ext.autosectionlabel",  # Allow reference sections using its title
     "sphinx.ext.mathjax",
-    "nbsphinx",  # provides a source parser for *.ipynb files.
-    # allows you to include Jupyter notebooks that sit outside your sphinx
-    # source directory in your documentation.
-    "nbsphinx_link",
-    # enables running code embedded in Sphinx documentation and embedding
-    # output of that code into the resulting document
-    "jupyter_sphinx",
     "sphinx_math_dollar",  # so that $$ $$ works for math
 ]
 
@@ -112,7 +107,7 @@ intersphinx_mapping = {
 # The suffix(es) of source filenames.
 # You can specify multiple suffix as a list of string:
 # source_suffix = ['.rst', '.md']
-source_suffix = [".rst", ".ipynb"]
+source_suffix = [".rst"]
 
 
 # The encoding of source files.
@@ -221,7 +216,7 @@ html_theme_options = {
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = []
+html_static_path = ["_static"]
 
 # -- Options for HTMLHelp output ---------------------------------------
 
@@ -312,3 +307,40 @@ mathjax3_config = {
         "displayMath": [["\\[", "\\]"]],
     }
 }
+
+
+# -- marimo notebooks ---------------------------------------------------------
+# Every marimo notebook of ``notebooks/`` is executed and exported to a static
+# HTML page (code + outputs) with ``marimo export html`` when the documentation
+# is built, then embedded by the pages of ``docs/sources/notebooks/``. The
+# notebooks run natively against the installed quickpaver (a WASM export could
+# not run the compiled Rust extension), and the build fails if a cell fails.
+# Set QUICKPAVER_DOCS_SKIP_NOTEBOOKS=1 to skip the export for quick builds.
+
+MARIMO_SRC = ROOT / "notebooks"
+MARIMO_OUT = Path(__file__).parent / "_static" / "marimo"
+
+
+def export_marimo_notebooks(app) -> None:
+    """Export the marimo notebooks to ``_static/marimo/<name>.html``."""
+    import os
+    import subprocess
+
+    from sphinx.util import logging
+
+    logger = logging.getLogger(__name__)
+    MARIMO_OUT.mkdir(parents=True, exist_ok=True)
+    if os.environ.get("QUICKPAVER_DOCS_SKIP_NOTEBOOKS"):
+        logger.warning("QUICKPAVER_DOCS_SKIP_NOTEBOOKS is set: notebooks not exported")
+        return
+    for notebook in sorted(MARIMO_SRC.glob("*.py")):
+        target = MARIMO_OUT / f"{notebook.stem}.html"
+        logger.info(f"marimo export html {notebook.name}")
+        cmd = [sys.executable, "-m", "marimo", "export", "html", str(notebook)]
+        cmd += ["-o", str(target), "--force"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"marimo export of {notebook.name} failed:\n"
+                f"{result.stdout}\n{result.stderr}"
+            )

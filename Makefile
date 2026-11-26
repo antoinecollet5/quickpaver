@@ -76,7 +76,7 @@ dist: ## build the sdist and a release wheel for the current platform
 
 docs: ## generate the Sphinx HTML documentation, including the API reference
 	rm -fr docs/build/ docs/sources/_autosummary/
-	uv run --only-group docs python -m sphinx -W --keep-going -b html docs/sources docs/build/html
+	uv run --group docs python -m sphinx -W --keep-going -b html docs/sources docs/build/html
 	$(BROWSER) docs/build/html/index.html
 
 benchmark: ## run the transfer-matrix and tiling benchmarks
