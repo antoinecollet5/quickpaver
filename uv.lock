@@ -5084,8 +5084,6 @@ wheels = [
 name = "quickpaver"
 source = { editable = "." }
 dependencies = [
-    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "matplotlib", version = "3.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -5113,6 +5111,10 @@ examples = [
     { name = "nested-grid-plotter" },
     { name = "pyvista", extra = ["all"] },
 ]
+plot = [
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "matplotlib", version = "3.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
 pyvista = [
     { name = "pyvista" },
 ]
@@ -5120,6 +5122,8 @@ pyvista = [
 [package.dev-dependencies]
 dev = [
     { name = "codespell" },
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "matplotlib", version = "3.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "maturin" },
     { name = "pre-commit", version = "4.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pre-commit", version = "4.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -5155,6 +5159,8 @@ docs = [
 ]
 lint = [
     { name = "codespell" },
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "matplotlib", version = "3.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pre-commit", version = "4.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pre-commit", version = "4.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pre-commit-hooks" },
@@ -5169,21 +5175,22 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "marimo", marker = "extra == 'examples'" },
-    { name = "matplotlib", specifier = ">=3.5" },
     { name = "matplotlib", marker = "extra == 'examples'" },
+    { name = "matplotlib", marker = "extra == 'plot'", specifier = ">=3.5" },
     { name = "nested-grid-plotter", marker = "extra == 'examples'", specifier = ">=2.1.0" },
     { name = "numpy", specifier = ">=1.22" },
     { name = "pyvista", marker = "extra == 'pyvista'" },
     { name = "pyvista", extras = ["all"], marker = "extra == 'examples'" },
-    { name = "quickpaver", extras = ["pyvista", "examples"], marker = "extra == 'all'" },
+    { name = "quickpaver", extras = ["plot", "pyvista", "examples"], marker = "extra == 'all'" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "shapely", specifier = ">=2.1" },
 ]
-provides-extras = ["all", "examples", "pyvista"]
+provides-extras = ["all", "examples", "plot", "pyvista"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "codespell", specifier = ">=2.3" },
+    { name = "matplotlib", specifier = ">=3.5" },
     { name = "maturin", specifier = ">=1.9,<2" },
     { name = "pre-commit", specifier = ">=4" },
     { name = "pre-commit-hooks", specifier = ">=5" },
@@ -5208,6 +5215,7 @@ docs = [
 ]
 lint = [
     { name = "codespell", specifier = ">=2.3" },
+    { name = "matplotlib", specifier = ">=3.5" },
     { name = "pre-commit", specifier = ">=4" },
     { name = "pre-commit-hooks", specifier = ">=5" },
     { name = "ruff", specifier = "==0.17.6" },
