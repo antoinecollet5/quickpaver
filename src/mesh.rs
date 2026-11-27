@@ -72,11 +72,11 @@ pub fn merge_points(xy: &[f64], tol: f64) -> (Vec<i64>, Vec<f64>) {
         return (Vec::new(), Vec::new());
     }
     let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::MIN, f64::MIN);
-    for p in xy.chunks_exact(2) {
-        x0 = x0.min(p[0]);
-        y0 = y0.min(p[1]);
-        x1 = x1.max(p[0]);
-        y1 = y1.max(p[1]);
+    for &[x, y] in xy.as_chunks::<2>().0 {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
     }
     // Any cell size >= tol finds every pair (they lie in adjacent cells); the
     // floor keeps the keys within i64 whatever tol.

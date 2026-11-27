@@ -11,8 +11,14 @@ import shapely
 import quickpaver as qp
 from quickpaver import _quickpaver as rs
 
-pv = pytest.importorskip("pyvista")
-vtk = pytest.importorskip("vtk")
+# Skip on any ImportError, not only a missing module: on some interpreters
+# (e.g. free-threaded builds) pyvista installs but its VTK wheel is incomplete,
+# and ``pytest.importorskip`` only skips ``ModuleNotFoundError``.
+try:
+    import pyvista as pv
+    import vtk
+except ImportError as exc:  # pragma: no cover - depends on the environment
+    pytest.skip(f"pyvista / vtk not usable: {exc}", allow_module_level=True)
 
 
 def _voronoi(n: int = 400, size: float = 100.0, seed: int = 0) -> np.ndarray:
@@ -213,7 +219,9 @@ def test_extrusion_layout_and_data() -> None:
 
 def test_extrude_follows_topography_and_casts_datasets() -> None:
     plane = pv.Plane(i_resolution=6, j_resolution=4)  # PolyData of quads
-    plane.points[:, 2] = 0.1 * plane.points[:, 0]  # tilted surface
+    tilted = np.array(plane.points)
+    tilted[:, 2] = 0.1 * tilted[:, 0]  # tilted surface
+    plane.points = tilted
     vol = qp.pv_extrude(plane, [0.2, 0.3])
     assert set(vol.celltypes) == {12} and _validity(vol) == {0}
     np.testing.assert_allclose(_vtk_volumes(vol), vol["Volume"], rtol=1e-9)
