@@ -1,6 +1,6 @@
 [package]
 name = "quickpaver"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Rust kernels of quickpaver: conservative transfer matrices between polygonal grids."

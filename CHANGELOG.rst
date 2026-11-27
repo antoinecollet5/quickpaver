@@ -2,6 +2,41 @@
 Changelog
 ==============
 
+0.8.0 (2026-11-27)
+------------------
+
+New API (Rust kernels, GIL released, no JIT compilation):
+
+* ENH: ``multipolygon_quality``: roundness quality of every cell of a tessellation
+  (``2r/R`` for triangles, ``(r_in / r_circ) / cos(pi / n)`` around the centroid or given
+  centres for other polygons), from Shapely polygons or ``(n, k, 2)`` vertex arrays such as
+  those of ``gen_polygonal_tiling_arrays`` (no GEOS at all on that path). Everything is
+  computed relative to the cell, so the scores keep full precision far from the origin
+  (e.g. projected coordinates).
+* ENH: ``triangle_anisotropy_quality``, ``square_anisotropy_quality`` and
+  ``hexagon_anisotropy_quality``: closed-form quality of stretched regular cells. Tilings
+  with ``anisotropy_ratio=a`` score exactly ``triangle(a)``, ``square(a)`` and
+  ``hexagon(1/a)``.
+* ENH: ``poisson_disk_sampling``: variable-radius Poisson disk sampling (Bridson) on a
+  pixel radius map. Every pair of points is at least ``r_i + r_j`` apart, and the set is
+  maximal (a fill pass seeds the regions that growth cannot reach, e.g. across sharp radius
+  jumps). Neighbour search uses one hash grid per radius octave and a min / max pyramid of
+  the radius map, so the cost per point stays flat whatever the radius contrast. Random
+  numbers come from xoshiro256++ and directions from a libm-free cosine / sine: a seed gives
+  bit-identical points on every platform.
+* ENH: VTK meshes (optional PyVista dependency): ``shapely_polygons_to_vtu`` (polygon
+  mesh whose cells share their vertices, merged by single linkage within ``merge_tol``
+  with a linear-time grid hash, rings oriented counter-clockwise, float64 points),
+  ``create_unstructured_mesh``, ``pv_extrude`` (layered, terrain-following extrusion to
+  wedges, hexahedra, pentagonal / hexagonal prisms and polyhedra, all oriented for positive
+  volumes and outward faces, upwards or downwards) and ``get_ncell4poly``. Meshes of
+  10^5 - 10^6 cells are built in about a second.
+
+Packaging:
+
+* BUILD: drop the stale ``NUMBA_DISABLE_JIT`` from ``tox.ini``.
+* DOCS: README note on the Claude-assisted migration of the kernels to Rust.
+
 0.7.0 (2026-11-26)
 ------------------
 

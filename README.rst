@@ -26,6 +26,13 @@ needed to install the package. Functions such as
 also return plain NumPy arrays for very large problems, where creating millions of Shapely
 objects would dominate the run time.
 
+The package also measures the **roundness quality** of the cells of any tessellation
+(tilings, triangulations, Voronoi diagrams) with ``multipolygon_quality``, and generates
+**variable-density blue-noise point sets** with ``poisson_disk_sampling`` (e.g. the seeds of
+a graded Voronoi mesh), and turns polygons into **VTK meshes** with shared vertices,
+extruded into layered 3D meshes (``shapely_polygons_to_vtu``, ``pv_extrude``; optional
+PyVista dependency).
+
 ===============
 🚀 Quick start
 ===============
@@ -393,6 +400,59 @@ Of course, it works with holes
    :width: 60%
    :align: center
 
+Cell quality and point sampling
+-------------------------------
+
+``multipolygon_quality`` scores every cell from ``1`` (regular polygon) towards ``0``
+(distorted): ``2r/R`` for triangles, ``(r_in / r_circ) / cos(pi / n)`` for other polygons.
+It accepts Shapely polygons or, fastest, the vertex arrays of ``gen_polygonal_tiling_arrays``.
+Closed forms give the expected score of a stretched regular cell.
+
+.. code-block:: python
+
+    import numpy as np
+    import shapely
+
+    vertices, _, _ = quickpaver.gen_polygonal_tiling_arrays(
+        shapely.box(0, 0, 100, 100), quickpaver.PolygonType.TRIANGLE, 2.0, anisotropy_ratio=2.0
+    )
+    quality = quickpaver.multipolygon_quality(vertices)  # all 0.8017...
+    quickpaver.triangle_anisotropy_quality(2.0)  # 0.8017...
+
+``poisson_disk_sampling`` draws points whose spacing follows a radius map (in pixels):
+every pair of points is at least ``r_i + r_j`` apart, and no room is left for another point.
+
+.. code-block:: python
+
+    yy, xx = np.mgrid[0:400, 0:600]
+    radius = 2.0 + 0.03 * np.hypot(xx - 300, yy - 200)  # finer in the centre
+    n_points, xy = quickpaver.poisson_disk_sampling(radius, seed=0)
+    domain = shapely.box(0, 0, 600, 400)
+    cells = shapely.intersection(
+        shapely.get_parts(shapely.voronoi_polygons(shapely.MultiPoint(xy), extend_to=domain)),
+        domain,
+    )  # graded Voronoi mesh
+
+Polygons become a PyVista mesh with shared vertices, which can be extruded into a
+layered 3D mesh (``pip install quickpaver[pyvista]``):
+
+.. code-block:: python
+
+    surface = quickpaver.shapely_polygons_to_vtu(cells, z=0.0)
+    volume = quickpaver.pv_extrude(surface, thickness=[1.0, 2.0, 5.0])  # 3 layers
+
+
+===================
+🤖 Acknowledgements
+===================
+
+The code of ``quickpaver`` was improved with the help of
+`Claude <https://www.anthropic.com/claude>`_ (Anthropic), especially for the migration
+from a `numba <https://numba.pydata.org/>`_ code base to a Rust backend
+(`PyO3 <https://pyo3.rs>`_ + `rayon <https://github.com/rayon-rs/rayon>`_). Compiled
+ahead of time and shipped in the wheels, the Rust kernels remove the JIT compilation time
+at the first call and run in parallel without holding the GIL, for much better
+performance. Every change is covered by the test suite.
 
 ===========
 🔑 License

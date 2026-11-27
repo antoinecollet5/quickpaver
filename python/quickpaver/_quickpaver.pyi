@@ -109,3 +109,23 @@ def points_in_polygon(px: _F1, py: _F1, vx: _F1, vy: _F1) -> npt.NDArray[np.bool
 def coo_to_csc(
     rows: _I1, cols: _I1, data: _F1, n_rows: int, n_cols: int
 ) -> tuple[_F2, npt.NDArray[np.int32], npt.NDArray[np.int32]]: ...
+def cell_quality(
+    xy: _F1,
+    offsets: _I1,
+    closed: bool,
+    centers: Optional[_F1] = None,
+    parallel: bool = True,
+) -> _F2: ...
+def poisson_disk_sampling(
+    radius: npt.NDArray[np.float32], k: int, seed: int
+) -> npt.NDArray[np.float32]: ...
+def polygon_mesh(
+    xy: _F1, offsets: _I1, closed: bool, tol: float
+) -> tuple[_F2, npt.NDArray[np.int64]]: ...
+def extrude_cells(
+    cells: npt.NDArray[np.int64],
+    celltypes: npt.NDArray[np.uint8],
+    points: _F2,
+    n_layers: int,
+    downward: bool,
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.uint8], _F2]: ...

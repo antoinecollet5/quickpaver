@@ -9,9 +9,12 @@ geographical test contours. The package is designed around cell-based geometry:
 tiles, polygons, and grid cells are represented explicitly and can be combined
 with NumPy arrays, Shapely geometries, and sparse SciPy matrices.
 
-The public API is grouped into four main areas:
+The public API is grouped into seven main areas:
 
 - polygon and tiling generation;
+- cell quality metrics;
+- point sampling;
+- VTK meshes (surface meshes and layered extrusion);
 - transfer-matrix construction;
 - geographical test contours;
 - rectilinear-grid utilities.
@@ -49,6 +52,47 @@ both the generated polygons and adjacency information between kept tiles.
    adjacency_by_shared_vertices
    adjacency_to_edges
    draw_adjacency
+
+Cell quality
+^^^^^^^^^^^^
+
+Roundness quality of the cells of a tessellation (triangulations, tilings,
+Voronoi diagrams): ``1`` for a regular polygon, decreasing towards ``0`` as the
+cell is distorted, plus closed forms for stretched regular cells.
+
+.. autosummary::
+   :toctree: _autosummary
+
+   multipolygon_quality
+   triangle_anisotropy_quality
+   square_anisotropy_quality
+   hexagon_anisotropy_quality
+
+Point sampling
+^^^^^^^^^^^^^^
+
+Blue-noise point sets whose local density follows a radius map (e.g. seeds of
+a graded Voronoi mesh).
+
+.. autosummary::
+   :toctree: _autosummary
+
+   poisson_disk_sampling
+
+VTK meshes
+^^^^^^^^^^
+
+PyVista / VTK meshes from polygons: surface meshes whose cells share their
+vertices, and layered (terrain-following) extrusion to 3D cells. Requires
+the optional PyVista dependency (``pip install quickpaver[pyvista]``).
+
+.. autosummary::
+   :toctree: _autosummary
+
+   shapely_polygons_to_vtu
+   create_unstructured_mesh
+   pv_extrude
+   get_ncell4poly
 
 Transfer matrices
 ^^^^^^^^^^^^^^^^^
@@ -134,7 +178,20 @@ from quickpaver._grid import (
     span_to_node_numbers_2d,
     span_to_node_numbers_3d,
 )
+from quickpaver._mesh import (
+    create_unstructured_mesh,
+    get_ncell4poly,
+    pv_extrude,
+    shapely_polygons_to_vtu,
+)
 from quickpaver._plot import adjacency_to_edges, draw_adjacency
+from quickpaver._quality import (
+    hexagon_anisotropy_quality,
+    multipolygon_quality,
+    square_anisotropy_quality,
+    triangle_anisotropy_quality,
+)
+from quickpaver._sampling import poisson_disk_sampling
 from quickpaver._tiling import (
     Disk,
     PolygonType,
@@ -208,4 +265,13 @@ __all__ = [
     "adjacency_by_shared_vertices",
     "adjacency_to_edges",
     "draw_adjacency",
+    "multipolygon_quality",
+    "triangle_anisotropy_quality",
+    "square_anisotropy_quality",
+    "hexagon_anisotropy_quality",
+    "poisson_disk_sampling",
+    "shapely_polygons_to_vtu",
+    "create_unstructured_mesh",
+    "pv_extrude",
+    "get_ncell4poly",
 ]

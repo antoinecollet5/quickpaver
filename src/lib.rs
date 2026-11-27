@@ -1,5 +1,6 @@
 //! Rust core of quickpaver: conservative transfer matrices between polygonal
-//! grids (rectilinear grids, triangular meshes, arbitrary polygons).
+//! grids (rectilinear grids, triangular meshes, arbitrary polygons), cell
+//! quality metrics, variable-radius Poisson disk sampling and VTK meshes.
 //!
 //! The Python-facing API lives at the bottom of this file; the kernels in
 //! [`transfer`] are plain Rust so that they can be unit-tested without an
@@ -8,12 +9,17 @@
 
 pub mod clip;
 pub mod geom;
+pub mod mesh;
+pub mod quality;
+pub mod sampling;
 pub mod surface;
 pub mod transfer;
 
 use geom::{Acc, Polys, ToLocal, ToWorld};
 use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
+use numpy::{
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -26,6 +32,8 @@ type U1<'py> = Bound<'py, PyArray1<u8>>;
 /// `(a, b, value, kind, ring coords (n, 2), ring length per entry)`
 type Out<'py> = (I1<'py>, I1<'py>, F1<'py>, U1<'py>, F2<'py>, I1<'py>);
 type Frame = (f64, f64, f64, f64);
+/// `(legacy cells, cell types, 2D cell areas)`
+type Extruded3d<'py> = (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<u8>>, F1<'py>);
 type Csc<'py> = (
     F1<'py>,
     Bound<'py, PyArray1<i32>>,
@@ -402,6 +410,139 @@ fn coo_to_csc<'py>(
     ))
 }
 
+/// Roundness quality of every polygon of an interleaved vertex buffer
+/// `[x0, y0, x1, y1, ...]` split by `offsets` (in vertices). With `closed`,
+/// the last vertex of every ring is its closing duplicate and is skipped.
+#[pyfunction]
+#[pyo3(signature = (xy, offsets, closed, centers=None, parallel=true))]
+fn cell_quality<'py>(
+    py: Python<'py>,
+    xy: PyReadonlyArray1<'py, f64>,
+    offsets: PyReadonlyArray1<'py, isize>,
+    closed: bool,
+    centers: Option<PyReadonlyArray1<'py, f64>>,
+    parallel: bool,
+) -> PyResult<F1<'py>> {
+    let r = quality::Rings {
+        xy: s1(&xy)?,
+        off: s1(&offsets)?,
+        closed,
+    };
+    r.validate().map_err(PyValueError::new_err)?;
+    let c = opt(&centers)?;
+    if let Some(c) = c {
+        if c.len() != 2 * r.n() {
+            return Err(PyValueError::new_err(format!(
+                "centers must hold {} (x, y) pairs, got {} values",
+                r.n(),
+                c.len()
+            )));
+        }
+    }
+    let q = py.detach(|| quality::rings_quality(&r, c, parallel));
+    Ok(q.into_pyarray(py))
+}
+
+/// Variable-radius Poisson disk sampling of a C-contiguous float32 radius
+/// map `(h, w)`; returns the float32 `(n, 2)` points `(x, y)`.
+#[pyfunction]
+fn poisson_disk_sampling<'py>(
+    py: Python<'py>,
+    radius: PyReadonlyArray2<'py, f32>,
+    k: usize,
+    seed: u64,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let (h, w) = (radius.shape()[0], radius.shape()[1]);
+    let r = radius
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("radius must be C-contiguous"))?;
+    let pts = py
+        .detach(|| sampling::poisson_disk(r, h, w, k, seed))
+        .map_err(PyValueError::new_err)?;
+    let n = pts.len() / 2;
+    Ok(Array2::from_shape_vec((n, 2), pts)
+        .expect("interleaved points")
+        .into_pyarray(py))
+}
+
+/// Polygons (interleaved vertices split by `offsets`, closing vertex
+/// included if `closed`) to a VTK polygon mesh: vertices within `tol` are
+/// merged (single linkage, cluster means), rings are made counter-clockwise.
+/// Returns the merged points `(m, 2)` and the legacy cell array.
+#[pyfunction]
+fn polygon_mesh<'py>(
+    py: Python<'py>,
+    xy: PyReadonlyArray1<'py, f64>,
+    offsets: PyReadonlyArray1<'py, isize>,
+    closed: bool,
+    tol: f64,
+) -> PyResult<(F2<'py>, Bound<'py, PyArray1<i64>>)> {
+    let r = quality::Rings {
+        xy: s1(&xy)?,
+        off: s1(&offsets)?,
+        closed,
+    };
+    r.validate().map_err(PyValueError::new_err)?;
+    if !(tol >= 0.0 && tol.is_finite()) {
+        return Err(PyValueError::new_err(
+            "merge tolerance must be finite and >= 0",
+        ));
+    }
+    let res = py.detach(|| {
+        let mut open = Vec::with_capacity(r.xy.len());
+        let mut off = Vec::with_capacity(r.n() + 1);
+        off.push(0usize);
+        for i in 0..r.n() {
+            open.extend_from_slice(r.ring(i));
+            off.push(open.len() / 2);
+        }
+        let (labels, merged) = mesh::merge_points(&open, tol);
+        mesh::polygon_cells(&off, &labels, &merged).map(|c| (merged, c))
+    });
+    let (merged, cells) = res.map_err(|p| {
+        PyValueError::new_err(format!(
+            "polygon {p} has fewer than 3 distinct vertices after merging \
+             (empty, degenerate, or merge tolerance too large)"
+        ))
+    })?;
+    let m = merged.len() / 2;
+    Ok((
+        Array2::from_shape_vec((m, 2), merged)
+            .expect("interleaved points")
+            .into_pyarray(py),
+        cells.into_pyarray(py),
+    ))
+}
+
+/// Extrude the 2D cells of a surface (legacy `cells`, `celltypes`, points
+/// `(n, 3)`) into `n_layers` layers. Returns the 3D legacy cell array, the
+/// cell types and the horizontal area of every 2D cell.
+#[pyfunction]
+fn extrude_cells<'py>(
+    py: Python<'py>,
+    cells: PyReadonlyArray1<'py, i64>,
+    celltypes: PyReadonlyArray1<'py, u8>,
+    points: PyReadonlyArray2<'py, f64>,
+    n_layers: usize,
+    downward: bool,
+) -> PyResult<Extruded3d<'py>> {
+    let (c, t) = (s1(&cells)?, s1(&celltypes)?);
+    if points.shape()[1] != 3 {
+        return Err(PyValueError::new_err("points must have shape (n, 3)"));
+    }
+    let p = points
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("points must be C-contiguous"))?;
+    let e = py
+        .detach(|| mesh::extrude(c, t, p, n_layers, downward))
+        .map_err(PyValueError::new_err)?;
+    Ok((
+        e.cells.into_pyarray(py),
+        e.types.into_pyarray(py),
+        e.area.into_pyarray(py),
+    ))
+}
+
 #[pymodule(gil_used = false)]
 fn _quickpaver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rect_items_transfer, m)?)?;
@@ -412,5 +553,9 @@ fn _quickpaver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(coo_to_csc, m)?)?;
     m.add_function(wrap_pyfunction!(classify_boxes, m)?)?;
     m.add_function(wrap_pyfunction!(points_in_polygon, m)?)?;
+    m.add_function(wrap_pyfunction!(cell_quality, m)?)?;
+    m.add_function(wrap_pyfunction!(poisson_disk_sampling, m)?)?;
+    m.add_function(wrap_pyfunction!(polygon_mesh, m)?)?;
+    m.add_function(wrap_pyfunction!(extrude_cells, m)?)?;
     Ok(())
 }
